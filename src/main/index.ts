@@ -64,9 +64,15 @@ function appVersion(): string {
   }
 }
 
+/** build/ is not packed into the asar, so the packaged build reads the copied resource. */
 function nativeIcon(): Electron.NativeImage {
-  const candidate = path.join(app.getAppPath(), 'build', 'icon.png')
-  return existsSync(candidate) ? nativeImage.createFromPath(candidate) : nativeImage.createEmpty()
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'icon.png'), path.join(app.getAppPath(), 'build', 'icon.png')]
+    : [path.join(app.getAppPath(), 'build', 'icon.png')]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return nativeImage.createFromPath(candidate)
+  }
+  return nativeImage.createEmpty()
 }
 
 function notify(title: string, body: string): void {

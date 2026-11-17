@@ -19,7 +19,7 @@
     "test": "npm run selftest",
     "shot": "node scripts/shot.mjs",
     "icon": "node scripts/make-icon.mjs && node scripts/make-ico.mjs",
-    "pack": "electron-vite build && electron-builder --win --x64 --dir && node scripts/patch-exe.mjs",
+    "pack": "electron-vite build && electron-builder --win --x64 --dir",
     "dist:zip": "npm run pack && node scripts/make-zip.mjs"
   },
   "dependencies": {

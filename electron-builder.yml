@@ -4,6 +4,7 @@ copyright: Ultra Harddisk Defrag 1.0
 directories:
   buildResources: build
   output: release
+afterPack: scripts/after-pack.cjs
 files:
   - out/**
   - resources/**
@@ -11,6 +12,8 @@ files:
 extraResources:
   - from: resources/data
     to: data
+  - from: build/icon.png
+    to: icon.png
 asar: true
 win:
   target:

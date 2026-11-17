@@ -133,7 +133,23 @@ passes to the new process.
 (100 entries), `state/{logs,stats,volumes,libraries}.json`. Writes are best-effort: a failed
 write logs and never crashes the app.
 
-### 4.10 UI surface
+### 4.10 Icon and branding
+
+`scripts/make-icon.mjs` draws the application icon analytically (no image library): a round platter
+with three fragmented teal arcs on the left and one consolidated amber arc on the right, around an
+amber spindle, on a graphite tile with a rim light so it stays visible on a dark taskbar.
+
+* Rendered at 16, 24, 32, 48, 64, 128 and 256 px — each size drawn natively with 4x supersampling,
+  never downscaled, so the 32 px taskbar icon keeps its arc separation.
+* `scripts/make-ico.mjs` packs all sizes into a multi-entry `build/icon.ico`.
+* `build/icon-preview.png` shows every size side by side for review.
+* Deliberately unlike **Ultra Malware Fighter's** blue shield — the two apps must never be confused in
+  the taskbar, tray or installer list.
+* The icon reaches the exe through `afterPack` → `scripts/patch-exe.mjs` (rcedit), and the window/tray
+  through `build/icon.png`, which `electron-builder.yml` copies to `resources/icon.png`
+  (`nativeIcon()` reads `process.resourcesPath` when packaged).
+
+### 4.11 UI surface
 Nine pages, custom frameless title bar with live elevation/engine chips, amber/graphite
 theme, no external font or asset dependency, CSP locked to `self`.
 

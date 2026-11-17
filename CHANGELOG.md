@@ -5,6 +5,24 @@ earned by passing the gates in `docs/ROADMAP.md`.
 
 ## [1.0.0] — 2026-11-17
 
+### Packaging — installer and identity
+
+* **NSIS installer** `release\UltraHarddiskDefrag-1.0.0-x64.exe` (per-user, no Administrator prompt)
+  built by `npm run dist`, alongside the portable zip.
+* `scripts/after-pack.cjs` (electron-builder `afterPack`) applies icon + version metadata with rcedit
+  during packaging. Building the installer re-packages the app, so a post-build patch to
+  `release/win-unpacked` was silently lost — the shipped exe had Electron's default atom icon until
+  this hook was added.
+* **New icon**: a round platter with three fragmented teal arcs consolidating into one amber arc, drawn
+  analytically at seven native sizes with 4x supersampling (`scripts/make-icon.mjs`), packed into a
+  multi-entry ICO (`scripts/make-ico.mjs`), preview sheet at `build/icon-preview.png`. Deliberately
+  unlike Ultra Malware Fighter's shield.
+* Window/tray icon fixed for packaged builds: `build/icon.png` is copied to `resources/icon.png` via
+  `extraResources` and `nativeIcon()` prefers `process.resourcesPath` when `app.isPackaged`.
+* Verified: `/S` install → 76 files + shortcuts + HKCU Uninstall entry, installed copy passed 53 IPC
+  assertions, `/S` uninstall clean; icons extracted from both the app exe and the installer exe are the
+  new platter mark.
+
 First working release. Built as a clean-room rebuild of the Smart Defrag 12 workflow on top
 of Microsoft's documented storage optimizer.
 

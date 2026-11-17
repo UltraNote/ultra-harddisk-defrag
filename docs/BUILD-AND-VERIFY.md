@@ -68,6 +68,23 @@ Outputs:
 | `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` | 107 MB | portable folder |
 | `release/win-unpacked/` | 269 MB | unpacked build, used by the E2E suites |
 
+### Icon pipeline
+
+```bash
+npm run icon     # make-icon.mjs (7 native sizes + preview sheet) -> make-ico.mjs (multi-entry ico)
+```
+
+`electron-builder.yml` runs `afterPack: scripts/after-pack.cjs`, which calls `scripts/patch-exe.mjs`
+(rcedit from the electron-builder cache) *inside* the packaging step. That ordering matters: patching
+`release/win-unpacked` after the fact is lost the moment the NSIS installer re-packages the app, which
+is exactly how the exe ended up with Electron's atom icon in the first packaging attempt. Verify with:
+
+```bash
+powershell -NoProfile -Command 'Add-Type -AssemblyName System.Drawing; $i=[System.Drawing.Icon]::ExtractAssociatedIcon("release\win-unpacked\Ultra Harddisk Defrag.exe"); $i.ToBitmap().Save("$env:TEMP\exe-icon.png")'
+```
+
+and look at the PNG, or compare `release\win-unpacked\resources\icon.png` with `build/icon.png`.
+
 ### Installer build note
 
 An earlier attempt failed while electron-builder extracted the `winCodeSign` archive

@@ -1,0 +1,29 @@
+appId: work.selman.ultra-harddisk-defrag
+productName: Ultra Harddisk Defrag
+copyright: Ultra Harddisk Defrag 1.0
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - resources/**
+  - package.json
+extraResources:
+  - from: resources/data
+    to: data
+asar: true
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: UltraHarddiskDefrag-${version}-${arch}.${ext}
+  # winCodeSign cannot be extracted without symlink privileges on this host;
+  # scripts/patch-exe.mjs applies the icon and version strings with rcedit instead.
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Ultra Harddisk Defrag
+  uninstallDisplayName: Ultra Harddisk Defrag 1.0

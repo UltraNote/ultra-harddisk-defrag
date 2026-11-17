@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+dist/
+.testfixtures/
+*.log
+.DS_Store
+Thumbs.db
+docs/tmp-*.png

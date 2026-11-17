@@ -12,16 +12,40 @@ third-party engine. If you delete the folder, the program is gone.
 
 ## 1. Installation
 
-Two ways to run 1.0:
+Three packages are produced by the build, all from the same sources:
 
-| Package | What it does |
-| --- | --- |
-| `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` | Portable folder. Unzip anywhere, run `Ultra Harddisk Defrag.exe`. |
-| `release/win-unpacked/` | The same build, already unpacked (this is what the test suite drives). |
+| Package | Size | What it does |
+| --- | --- | --- |
+| `release/UltraHarddiskDefrag-1.0.0-x64.exe` | 78 MB | **Installer** (NSIS, per-user). Shortcuts, uninstall entry, no Administrator needed to install. |
+| `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` | 107 MB | Portable folder. Unzip anywhere, run `Ultra Harddisk Defrag.exe`. |
+| `release/win-unpacked/` | — | The same build, already unpacked (this is what the test suite drives). |
 
-The NSIS installer (`npm run dist`) must be built from an **elevated** terminal on this
-machine — electron-builder extracts a signing tool with symlinks, which a standard user
-token cannot create. The portable zip is the recommended distribution for 1.0.
+### Installing with the installer
+
+1. Double-click `UltraHarddiskDefrag-1.0.0-x64.exe`.
+2. SmartScreen warns because the binary is unsigned — *More info → Run anyway*.
+3. The assisted wizard offers the per-user target directory (default
+   `%LOCALAPPDATA%\Programs\ultra-harddisk-defrag`), then creates a Start-menu shortcut,
+   an optional desktop shortcut and an entry under *Apps & features*.
+4. No Administrator prompt: the install is per-user by design (`perMachine: false`).
+
+Silent install (unattended, no wizard):
+
+```bat
+UltraHarddiskDefrag-1.0.0-x64.exe /S
+UltraHarddiskDefrag-1.0.0-x64.exe /S /D=C:\Tools\UltraHarddiskDefrag
+```
+
+`/D=` must be the **last** argument, unquoted, with real backslashes.
+
+### Uninstalling
+
+*Apps & features → Ultra Harddisk Defrag 1.0 → Uninstall*, or run
+`"<install dir>\Uninstall Ultra Harddisk Defrag.exe"` (add `/S` for silent). Settings and
+history in `%APPDATA%\Ultra Harddisk Defrag` are kept; delete that folder too for a full
+removal.
+
+The portable zip remains the way to try the app without touching the system at all.
 
 First start creates `%APPDATA%\Ultra Harddisk Defrag\`:
 

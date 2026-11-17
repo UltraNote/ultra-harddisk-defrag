@@ -57,15 +57,42 @@ powershell -NoProfile -Command "Stop-Process -Id $PID -Force"
 ```bash
 npm run pack       # electron-vite build + electron-builder --dir + icon/version patching
 npm run dist:zip   # pack + 7z zip of release/win-unpacked
+npm run dist       # electron-vite build + electron-builder --win --x64  (builds the NSIS installer)
 ```
 
-Output: `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` (≈107 MB).
+Outputs:
 
-`npm run dist` (NSIS installer) needs an **elevated** terminal on this machine:
-electron-builder extracts `winCodeSign` with symlinks and a standard token cannot create
-them (`Cannot create symbolic link : A required privilege is not held by the client`).
-`signAndEditExecutable: false` plus `scripts/patch-exe.mjs` (rcedit) applies the icon and
-version metadata without that toolchain.
+| File | Size | Notes |
+| --- | --- | --- |
+| `release/UltraHarddiskDefrag-1.0.0-x64.exe` | 78 MB | per-user NSIS installer + `.blockmap` |
+| `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` | 107 MB | portable folder |
+| `release/win-unpacked/` | 269 MB | unpacked build, used by the E2E suites |
+
+### Installer build note
+
+An earlier attempt failed while electron-builder extracted the `winCodeSign` archive
+(`Cannot create symbolic link : A required privilege is not held by the client` — that
+archive contains macOS symlinks). It succeeds in a **standard** shell once the cache holds an
+extracted copy and `signAndEditExecutable: false` keeps the toolchain out of the rcedit path.
+If the error ever returns:
+
+```bash
+7za x "$LOCALAPPDATA/electron-builder/Cache/winCodeSign/<n>.7z" -o"$LOCALAPPDATA/electron-builder/Cache/winCodeSign/<n>" -snld -x'!darwin*'
+```
+
+### Installer verification (run for 1.0)
+
+```bash
+# silent install into a throwaway directory, then run the installed copy
+powershell -NoProfile -Command "Start-Process -FilePath 'release\UltraHarddiskDefrag-1.0.0-x64.exe' \
+  -ArgumentList '/S','/D=C:\Users\<user>\AppData\Local\Temp\udefrag-install' -PassThru -Wait"
+node scripts/ipc-test.mjs 9338        # 53 passed, 0 failed, 2 skipped
+# silent uninstall, then confirm the tree, shortcuts and Uninstall key are gone
+```
+
+Git Bash mangles `/S` and `/D=...` (backslashes are eaten: `/D=C:\Users\x` becomes
+`C:Usersx`). Either use PowerShell `Start-Process -ArgumentList` as above, or
+`MSYS2_ARG_CONV_EXCL='*'` plus a single-quoted `/D='C:\path'`.
 
 ## 5. What each suite actually asserts
 

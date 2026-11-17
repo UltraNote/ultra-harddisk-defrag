@@ -59,17 +59,27 @@ Windows refuses storage-optimizer writes to a standard user token (`0x89000024`)
 never works around that: it shows the elevation state in the title bar, allows dry runs and
 health reads unelevated, and offers a one-click UAC relaunch when a real job is requested.
 
+## Install
+
+| Package | What it is |
+| --- | --- |
+| `release/UltraHarddiskDefrag-1.0.0-x64.exe` | **Installer** — per-user NSIS, no Administrator needed, shortcuts + uninstall entry |
+| `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` | Portable folder — unzip anywhere and run `Ultra Harddisk Defrag.exe` |
+
+Silent install: `UltraHarddiskDefrag-1.0.0-x64.exe /S [/D=<dir>]`. The binary is unsigned, so
+SmartScreen warns once (*More info → Run anyway*).
+
 ## Build
 
 ```bash
 npm install
 npm run icon
 npm run typecheck && npm run selftest
-npm run pack && npm run dist:zip
+npm run dist          # installer  → release/UltraHarddiskDefrag-1.0.0-x64.exe
+npm run dist:zip      # portable   → release/UltraHarddiskDefrag-1.0.0-win-x64.zip
 ```
 
-Result: `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` — unzip anywhere and run
-`Ultra Harddisk Defrag.exe`. Full details in
+Full details, including the installer verification cycle, in
 [`docs/BUILD-AND-VERIFY.md`](docs/BUILD-AND-VERIFY.md).
 
 ## Verification
@@ -80,6 +90,7 @@ Result: `release/UltraHarddiskDefrag-1.0.0-win-x64.zip` — unzip anywhere and r
 | `npm run selftest` | 30 passed, 0 failed |
 | `npm run test:ipc` (dev and packaged) | 53 passed, 0 failed, 2 skipped |
 | `npm run test:window` | 7 passed, 0 failed |
+| installer → install → run → uninstall | 75 files installed, 53 IPC assertions pass from the installed copy, clean removal |
 
 ## Safety
 

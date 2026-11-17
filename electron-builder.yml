@@ -17,8 +17,9 @@ win:
     - target: nsis
       arch: [x64]
   artifactName: UltraHarddiskDefrag-${version}-${arch}.${ext}
-  # winCodeSign cannot be extracted without symlink privileges on this host;
-  # scripts/patch-exe.mjs applies the icon and version strings with rcedit instead.
+  # No code-signing certificate: the build is unsigned, so SmartScreen warns once.
+  # signAndEditExecutable stays false because rcedit (scripts/patch-exe.mjs) applies the
+  # icon and version strings without electron-builder's winCodeSign toolchain.
   signAndEditExecutable: false
 nsis:
   oneClick: false

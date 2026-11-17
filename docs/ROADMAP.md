@@ -110,7 +110,7 @@ modules, kernel drivers shipped without a signing story, telemetry.
    succeeds but the statistics panel stays empty. Mitigation shipped: the raw report tail is
    always visible in the log box.
 2. Scheduled work requires the app to be running (see 1.2 P0).
-3. The NSIS installer cannot be built from a non-elevated shell on this machine (electron-builder
-   symlink extraction), so 1.0 ships as a portable zip.
+3. The installer is unsigned, so SmartScreen warns once on first launch. A code-signing
+   certificate is a funding decision (see 2.0), not an engineering one.
 4. SMART values are frequently unavailable for NVMe in user space; the UI states this rather
    than guessing.

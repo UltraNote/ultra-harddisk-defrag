@@ -48,8 +48,9 @@ of Microsoft's documented storage optimizer.
 * `scripts/ipc-test.mjs` — CDP-driven suite against the real main process: 53 assertions.
 * `scripts/window-test.mjs` — maximize/work-area, title bar, and a real HKCU Run round-trip.
 * `scripts/tour.mjs` — screenshots every page into a temp dir.
-* Packaging: procedural icon (`make-icon.mjs` → `make-ico.mjs`), `pack` + `dist:zip`,
-  `patch-exe.mjs` applying icon and version metadata without the winCodeSign toolchain.
+* Packaging: procedural icon (`make-icon.mjs` → `make-ico.mjs`), per-user **NSIS installer**
+  (`npm run dist`), portable `dist:zip`, `patch-exe.mjs` applying icon and version metadata
+  without the winCodeSign toolchain.
 
 **Docs** — `docs/USER-GUIDE.md`, `docs/FEATURES.md`, `docs/ROADMAP.md`,
 `docs/REVERSE-ENGINEERING.md`, `docs/BUILD-AND-VERIFY.md`.
@@ -62,9 +63,12 @@ npm run selftest            30 passed, 0 failed, 0 skipped
 npm run test:ipc  (dev)     53 passed, 0 failed, 2 skipped
 npm run test:ipc  (packaged)53 passed, 0 failed, 2 skipped
 npm run test:window         7 passed, 0 failed
+installer cycle             /S install (75 files + shortcuts + Uninstall key),
+                            installed copy passes all 53 IPC assertions, /S uninstall clean
 ```
 
-Packaged artifact: `release/UltraHarddiskDefrag-1.0.0-win-x64.zip`.
+Artifacts: `release/UltraHarddiskDefrag-1.0.0-x64.exe` (installer, 78 MB) and
+`release/UltraHarddiskDefrag-1.0.0-win-x64.zip` (portable, 107 MB).
 
 ### Known limitations
 
@@ -74,6 +78,5 @@ Packaged artifact: `release/UltraHarddiskDefrag-1.0.0-win-x64.zip`.
 * Localized (non-English) Windows may return a stats block the parser misses; the raw report
   stays visible in the log box.
 * SMART temperature/wear/hours are frequently unavailable for NVMe in user space.
-* The NSIS installer requires an elevated terminal to build on this machine; 1.0 ships as a
-  portable zip.
+* The installer and binaries are unsigned: Windows SmartScreen warns on first launch.
 * Unsigned binary — Windows SmartScreen warns on first run.

@@ -2,11 +2,12 @@ import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { LargeFileEntry, LibraryEntry, MediaType, VolumeInfo } from '../../shared/types'
-import { run } from './shell'
+import { normaliseVolume } from './defrag'
+import { run, systemExecutable } from './shell'
 
 const SKIP_DIRS = new Set([
   'windows', 'winsxs', 'servicing', 'system volume information', '$recycle.bin', 'recovery',
-  'programdata\\microsoft', 'node_modules', '.git', 'drivers', 'driverstore', 'assembly'
+  'node_modules', '.git', 'drivers', 'driverstore', 'assembly'
 ])
 
 interface SteamLibrary {
@@ -26,7 +27,7 @@ async function readSteamLibraries(): Promise<SteamLibrary[]> {
   const libraries: SteamLibrary[] = []
   const seen = new Set<string>()
 
-  const registry = await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath'], 10_000)
+  const registry = await run(systemExecutable('reg.exe'), ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath'], 3000)
   const regPath = registry.stdout.match(/SteamPath\s+REG_SZ\s+(.+)/i)?.[1]?.trim()
   const roots = [...(regPath ? [regPath.replace(/\//g, '\\')] : []), ...steamRoots()]
 
@@ -89,6 +90,7 @@ async function directorySize(target: string, deadline: number): Promise<number> 
       continue
     }
     for (const entry of entries) {
+      if (Date.now() >= deadline) return total
       const full = path.join(dir, entry.name)
       try {
         if (entry.isDirectory()) {
@@ -157,8 +159,13 @@ export async function scanLargeFiles(
   options: LargeFileOptions
 ): Promise<{ files: LargeFileEntry[]; truncated: boolean; scannedFiles: number }> {
   const { minSizeMb, limit } = options
+  if (!Number.isFinite(minSizeMb) || !Number.isInteger(limit) || limit < 1 || limit > 2000) {
+    throw new Error('Choose a valid size and a result limit between 1 and 2,000.')
+  }
   const budgetMs = options.budgetMs ?? 25_000
-  const root = options.root ?? `${(options.volume ?? 'C:').replace(':', '').toUpperCase()}:\\`
+  const drive = options.root ? null : normaliseVolume(options.volume ?? process.env.SystemDrive ?? 'C:')
+  const root = options.root ?? `${drive!.replace(/\\$/, '')}\\`
+  if (!path.isAbsolute(root)) throw new Error('Choose an absolute folder path.')
   const threshold = Math.max(1, minSizeMb) * 1024 * 1024
   const deadline = Date.now() + budgetMs
   const all: LargeFileEntry[] = []
@@ -166,8 +173,8 @@ export async function scanLargeFiles(
   let truncated = false
   const stack = [root]
 
-  while (stack.length) {
-    if (Date.now() > deadline) {
+  walk: while (stack.length) {
+    if (Date.now() >= deadline) {
       truncated = true
       break
     }
@@ -176,13 +183,18 @@ export async function scanLargeFiles(
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
     } catch {
+      if (dir === root) throw new Error(`Cannot read folder: ${root}`)
       continue
     }
     for (const entry of entries) {
+      if (Date.now() >= deadline) {
+        truncated = true
+        break walk
+      }
       const full = path.join(dir, entry.name)
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name.toLowerCase())) continue
-        if (/^windows$/i.test(entry.name) && dir === root) continue
+        if (entry.name.toLowerCase() === 'microsoft' && path.basename(dir).toLowerCase() === 'programdata') continue
         stack.push(full)
         continue
       }

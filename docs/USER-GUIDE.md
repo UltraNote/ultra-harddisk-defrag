@@ -94,7 +94,7 @@ to work around that, because the workaround would be a kernel driver.
   * **→** — opens the full toolbox for that volume
 * **Optimize all** — walks every fixed volume and runs the media-appropriate action in
   sequence. One job at a time, always.
-* **Automation summary** — Auto Defrag, schedule, boot optimization state.
+* **Automation summary** — Auto Defrag and scheduled optimization.
 * **Recent runs** — the last job of this session plus the most recent history record with
   before → after fragmentation.
 
@@ -114,7 +114,9 @@ The workbench. Pick a volume chip (C: SSD, D: HDD, …), then an operation:
 | Free Space Defrag | `defrag C: /X /U /V` | Consolidates free space for contiguous writes. |
 | Trim & Intelligent Optimize | `defrag C: /L /U` | Sends TRIM / releases free blocks on an SSD. |
 | Slab Consolidation | `defrag C: /K /U` | Slab consolidation for thinly provisioned volumes. |
-| Boot Time Defrag | `defrag C: /B` | Schedules boot-file optimization for the next restart. |
+| Boot Time Defrag | `defrag C: /B` | Runs Windows boot-file optimization on a detected HDD. |
+
+Choose a tile to preview its command. Select **Run operation** to start it or **Dry run** to validate it.
 
 Under the tiles:
 
@@ -128,7 +130,7 @@ Under the tiles:
 * **History** — last 100 runs with state (`completed`, `failed`, `cancelled`,
   `needs-elevation`), duration, fragmentation before → after and the exit code.
 
-Cancel stops the child process tree (`taskkill /T /F`) and records the run as `cancelled`.
+Cancel stops the optimizer process tree, records the run as `cancelled`, and drops the rest of the current batch.
 
 ### 3.3 Large Files
 
@@ -171,15 +173,13 @@ trust.
 **Scheduled defrag**
 
 * Daily / weekly (pick a weekday) / monthly (pick a day), at a chosen hour and minute.
-* Checked once per minute while the app runs; one run per calendar day.
+* Checked every 30 seconds while the app runs. The last scheduled day is recorded across app restarts.
 * `shutdownAfter` shuts the PC down **only** if every volume finished successfully, after a
   60-second countdown that can be cancelled.
 
 **Boot time optimization**
 
-* Toggles for pagefile, Master File Table, system files and registry hives, plus cadence.
-* **Ask Windows to optimize at next restart** runs `defrag C: /B` immediately — the actual
-  work happens during the next boot, not now.
+* **Run boot-file optimization** invokes `defrag.exe /B` for a system volume Windows identifies as an HDD.
 
 **Silent mode**
 
@@ -189,7 +189,7 @@ trust.
 **After a finished run**
 
 * none / sleep / hibernate / shut down / restart, with a configurable delay (minimum 10 s)
-  and a cancel route through the notification.
+  and a cancel control in the app, tray menu, and Windows notification. Power actions follow a successful batch with at least one real optimization.
 
 Eligible volumes are fixed NTFS volumes that are not in the exclusion list. Battery guard
 skips automatic work on battery power.
@@ -235,9 +235,7 @@ the store. Size is capped by *Settings → Log & storage*.
 
 * **General** — minimize to tray, start with Windows (HKCU Run, no service),
   tray notifications, hide removable volumes, language.
-* **Defrag behaviour** — battery guard, skip files over 1 GB, VSS preference (recorded
-  only — the app never stops Volume Shadow Copy), "become the default defrag tool" shell
-  verb (off by default, never replaces `dfrgui.exe`).
+* **Defrag behaviour** — battery guard for idle and scheduled passes.
 * **Excluded volumes** — letters skipped by automatic and scheduled passes; manual runs
   still work.
 * **Notifications** — toast duration, completion notifications, health warnings.

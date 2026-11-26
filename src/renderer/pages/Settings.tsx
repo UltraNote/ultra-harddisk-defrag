@@ -28,7 +28,7 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
 }
 
 export default function SettingsPage(): React.JSX.Element {
-  const { settings, saveSettings, status, pushToast, refreshStatus } = useApp()
+  const { settings, saveSettings, resetSettings, status, pushToast } = useApp()
   const [section, setSection] = React.useState<Section>('general')
   const [exclusion, setExclusion] = React.useState('')
 
@@ -66,7 +66,7 @@ export default function SettingsPage(): React.JSX.Element {
               <Row label="Tray notifications" desc="Show a balloon when a scheduled or automatic run finishes.">
                 <Toggle on={settings.general.trayNotifications} onChange={(next) => void saveSettings({ general: { trayNotifications: next } })} />
               </Row>
-              <Row label="Hide removable volumes" desc="USB sticks and external drives stay out of the volume list and automatic runs.">
+              <Row label="Hide removable volumes" desc="Hide volumes Windows identifies as removable.">
                 <Toggle on={settings.general.hideRemovable} onChange={(next) => void saveSettings({ general: { hideRemovable: next } })} />
               </Row>
               <Row label="Language" desc="Only English ships in 1.0; the string table is in the open.">
@@ -82,15 +82,6 @@ export default function SettingsPage(): React.JSX.Element {
               <div className="card-head"><h3>Defrag behaviour</h3></div>
               <Row label="Battery guard" desc="Automatic runs are skipped while the machine runs on battery.">
                 <Toggle on={settings.defrag.batteryGuard} onChange={(next) => void saveSettings({ defrag: { batteryGuard: next } })} />
-              </Row>
-              <Row label="Skip files larger than 1 GB" desc="Automatic runs leave huge files alone; the Large Files page can still defragment them explicitly.">
-                <Toggle on={settings.defrag.skipFilesOver1Gb} onChange={(next) => void saveSettings({ defrag: { skipFilesOver1Gb: next } })} />
-              </Row>
-              <Row label="Request VSS stop during defrag" desc="Recorded preference. The bundled Windows optimizer decides on its own; the app never stops Volume Shadow Copy itself.">
-                <Toggle on={settings.defrag.stopVss} onChange={(next) => void saveSettings({ defrag: { stopVss: next } })} />
-              </Row>
-              <Row label="Become the default defrag tool" desc="Adds a shell verb so the volume context menu can open Ultra Harddisk Defrag. Off by default; it never replaces dfrgui.exe.">
-                <Toggle on={settings.defrag.replaceWindowsDefrag} onChange={(next) => void saveSettings({ defrag: { replaceWindowsDefrag: next } })} />
               </Row>
             </>
           ) : null}
@@ -211,11 +202,7 @@ export default function SettingsPage(): React.JSX.Element {
               <Row label="Restore defaults" desc="Every setting returns to the shipped default; the history and log files are kept.">
                 <button
                   className="btn sm"
-                  onClick={async () => {
-                    await api.resetSettings()
-                    await refreshStatus()
-                    pushToast({ title: 'Settings restored', body: 'Defaults are back.', level: 'success' })
-                  }}
+                  onClick={() => void resetSettings()}
                 >
                   <RotateCcw size={12} /> Reset
                 </button>

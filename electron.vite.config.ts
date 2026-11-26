@@ -1,6 +1,6 @@
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
-import react from '@vitejs/plugin-react'
+import { rendererPlugins } from './scripts/vite-renderer.mts'
 
 export default defineConfig({
   main: {
@@ -24,7 +24,7 @@ export default defineConfig({
     resolve: {
       alias: { '@shared': resolve(__dirname, 'src/shared') }
     },
-    plugins: [react()],
+    plugins: rendererPlugins(),
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, 'src/renderer/index.html') }

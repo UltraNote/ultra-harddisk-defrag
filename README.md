@@ -17,10 +17,10 @@ idle automation, game-library awareness) and a few things this project refuses t
 (unsigned kernel drivers, subscription nagging, bundled engines). Ultra Harddisk Defrag 1.0
 rebuilds the useful half from documented Windows interfaces:
 
-* every operation maps to a **documented `defrag.exe` switch**, shown in the UI before it runs
+* every disk operation maps to a **Windows `defrag.exe` switch**, shown in the command preview
 * every number comes from **`Get-Volume` / `Get-PhysicalDisk` / `defrag /A` / `fsutil`** —
   nothing is estimated, and unavailable values say so
-* SSDs are **trimmed, never defragmented**, driven by the media type Windows reports
+* Optimize and Fast Defrag use TRIM on detected SSDs. Explicit defrag operations require a detected HDD
 
 ## Documentation
 
@@ -45,9 +45,9 @@ Read in this order:
 | --- | --- |
 | Dashboard | Volume cards with real fragmentation and usage bars, Optimize all, automation summary, recent runs |
 | Defrag | 8 operations (`/A /O /D /X /L /K /B`, quick mode), command preview, dry run, live progress, stats, history |
-| Large Files | Bounded scan (25 s budget), threshold picker, pagefile-sized file defrag via `/File` |
+| Large Files | Bounded scan (25 s budget), threshold picker, selected-file defrag on HDDs via `/File` |
 | Disk Health | TRIM state, media/bus/health from CIM, SMART only when the provider exposes it |
-| Schedule | Idle Auto Defrag (threshold + cool-down), daily/weekly/monthly schedule, boot optimization, silent mode, after-task power actions |
+| Schedule | Idle Auto Defrag (threshold + cool-down), daily/weekly/monthly schedule, manual boot-file optimization, silent mode, after-task power actions |
 | Game & App Boost | Steam and Epic library detection, per-library retrim/optimize |
 | Action Center | Severity-ranked issues computed from live state, Fix All |
 | Logs | Five channels, filtering, capped retention |
@@ -71,10 +71,14 @@ SmartScreen warns once (*More info → Run anyway*).
 
 ## Build
 
+Use Windows 10 or 11 and Node.js 22.12 or newer.
+
 ```bash
-npm install
-npm run icon
-npm run typecheck && npm run selftest
+npm ci
+npm run typecheck
+npm test
+npm run build
+npm run test:desktop
 npm run dist          # installer  → release/UltraHarddiskDefrag-1.0.0-x64.exe
 npm run dist:zip      # portable   → release/UltraHarddiskDefrag-1.0.0-win-x64.zip
 ```
@@ -87,10 +91,10 @@ Full details, including the installer verification cycle, in
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | clean (node + web) |
-| `npm run selftest` | 30 passed, 0 failed |
-| `npm run test:ipc` (dev and packaged) | 53 passed, 0 failed, 2 skipped |
-| `npm run test:window` | 7 passed, 0 failed |
-| installer → install → run → uninstall | 75 files installed, 53 IPC assertions pass from the installed copy, clean removal |
+| `npm test` | 40 engine checks passed |
+| `npm run test:desktop` | 71 IPC and 9 window checks passed per build. UAC and the native file picker require manual verification. |
+| Installer | Silent install, desktop tests, and removal verified |
+| `npm audit` | 0 known vulnerabilities reported |
 
 ## Safety
 

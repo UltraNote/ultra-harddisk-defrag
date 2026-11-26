@@ -27,7 +27,9 @@ export interface AppContextValue {
   saveSettings: (patch: DeepPartial<Settings>) => Promise<void>
   navigate: (page: PageId) => void
   pushToast: (toast: ToastPayload) => void
-  runJob: (request: DefragRequest) => Promise<DefragJob>
+  runJob: (request: DefragRequest) => Promise<void>
+  runJobs: (requests: DefragRequest[]) => Promise<void>
+  resetSettings: () => Promise<void>
   cancelJob: () => Promise<void>
   elevate: () => Promise<void>
 }

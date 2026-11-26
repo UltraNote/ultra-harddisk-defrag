@@ -2,12 +2,13 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, p
 import { existsSync, readFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { createPaths, ensureDirs, nowIso, type RuntimePaths } from './engine/runtime'
+import { pathToFileURL } from 'node:url'
+import { createPaths, ensureDirs, nowIso } from './engine/runtime'
 import { Store } from './engine/store'
 import { DefragRunner, ACTION_LABELS, engineInfo } from './engine/defrag'
 import { diskHealth, listVolumes } from './engine/volumes'
-import { detectLibraries } from './engine/libraries'
-import { powershell, run } from './engine/shell'
+import { detectLibraries, scanLargeFiles } from './engine/libraries'
+import { isElevated, powershell, run, runPowerShell, systemExecutable } from './engine/shell'
 import {
   DEFAULT_SETTINGS,
   type ActionCenterIssue,
@@ -18,8 +19,6 @@ import {
   type DefragRequest,
   type DeepPartial,
   type DiskHealth,
-  type LargeFileEntry,
-  type LibraryEntry,
   type LogEntry,
   type OptimizeHistoryEntry,
   type Settings,
@@ -32,7 +31,6 @@ const isDev = !app.isPackaged
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
-let paths: RuntimePaths
 let store: Store
 let runner: DefragRunner
 let env = { host: '', os: '', elevated: false }
@@ -43,11 +41,17 @@ let health: DiskHealth | null = null
 let lastJob: DefragJob | null = null
 let quitting = false
 let schedulerTimer: NodeJS.Timeout | null = null
-let lastScheduledDay = ''
-let lastAutoDefragAt = 0
-let pendingPowerAction: { action: string; dueAt: number; timer: NodeJS.Timeout } | null = null
+let refreshTimer: NodeJS.Timeout | null = null
+let schedulerRunning = false
+let batchRunning = false
+let batchCancelled = false
+type PowerAction = NonNullable<AppStatus['pendingPowerAction']>['action']
+let pendingPowerAction: { action: PowerAction; dueAt: number; timer: NodeJS.Timeout } | null = null
 let silentCache = { at: 0, active: false }
 let volumesRefreshedAt = 0
+let warnedDisks = new Set<string>()
+let volumeRefresh: Promise<void> | null = null
+const APP_ID = 'work.selman.ultra-harddisk-defrag'
 
 function broadcast(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
@@ -76,7 +80,6 @@ function nativeIcon(): Electron.NativeImage {
 }
 
 function notify(title: string, body: string): void {
-  if (!store.settings().notifications.optimizeComplete) return
   if (!Notification.isSupported()) return
   new Notification({ title, body }).show()
 }
@@ -88,36 +91,43 @@ async function detectEnv(): Promise<void> {
     release: os.release(),
     arch: os.arch()
   }))
-  const elevated = (await run('net', ['session'], 8000)).ok
+  const elevated = await isElevated()
   env = { host: hostname, os: `${type} ${release} ${arch}`.trim(), elevated }
 }
 
 async function refreshVolumes(force = false): Promise<void> {
+  if (volumeRefresh) return volumeRefresh
   if (!force && Date.now() - volumesRefreshedAt < 15_000 && volumes.length) return
-  const previous = new Map(volumes.map((v) => [v.letter, v.fragmentation]))
-  const memory = store.volumeState()
+  volumeRefresh = loadVolumes().finally(() => { volumeRefresh = null })
+  return volumeRefresh
+}
+
+async function loadVolumes(): Promise<void> {
   const fresh = await listVolumes()
+  const nextHealth = await diskHealth(fresh)
+  const previous = new Map(volumes.map((v) => [v.id, v.fragmentation]))
+  const memory = store.volumeState()
   for (const volume of fresh) {
     if (!volume.letter) continue
-    const record = memory[volume.letter]
+    const record = memory[volume.id] ?? memory[volume.letter]
     if (record) {
       volume.lastOptimizedAt = record.lastOptimizedAt
       volume.lastAction = record.lastAction
     }
-    const memo = previous.get(volume.letter)
+    const memo = previous.get(volume.id)
     if (memo) volume.fragmentation = memo
+    if (volume.fileSystem.toUpperCase() === 'NTFS' && volume.mediaType === 'SSD') volume.trimSupported = nextHealth.trimEnabled
   }
   volumes = fresh
+  health = nextHealth
   volumesRefreshedAt = Date.now()
-  health = await diskHealth(volumes)
-  for (const volume of volumes) {
-    const disk = health.physicalDisks.find((d) => String(d.deviceId) === String(volume.diskNumber))
-    if (disk) volume.trimSupported = disk.mediaType === 'SSD' && health.trimEnabled === true
+  const diskIssues = actionCenterIssues().filter((issue) => issue.id.startsWith('health-'))
+  if (store.settings().notifications.healthWarning) {
+    for (const issue of diskIssues) {
+      if (!warnedDisks.has(issue.title)) notify(issue.title, issue.detail)
+    }
+    warnedDisks = new Set(diskIssues.map((issue) => issue.title))
   }
-}
-
-function settingsForStatus(): Settings {
-  return store.settings()
 }
 
 function scheduledNextRun(): string | null {
@@ -133,8 +143,8 @@ function scheduledNextRun(): string | null {
     next.setDate(now.getDate() + delta)
     if (next <= now) next.setDate(next.getDate() + 7)
   } else {
-    next.setDate(Math.max(1, schedule.dayOfMonth))
-    if (next <= now) next.setMonth(next.getMonth() + 1, Math.max(1, schedule.dayOfMonth))
+    next.setDate(schedule.dayOfMonth)
+    if (next <= now) next.setMonth(next.getMonth() + 1, schedule.dayOfMonth)
   }
   return next.toISOString()
 }
@@ -172,8 +182,9 @@ function actionCenterIssues(): ActionCenterIssue[] {
     })
   }
   for (const volume of volumes) {
+    if (!volume.letter || volume.kind !== 'fixed') continue
     const percent = volume.fragmentation?.totalFragmentedSpacePercent ?? null
-    if (percent !== null && percent >= 10 && volume.kind === 'fixed') {
+    if (percent !== null && percent >= settings.autoDefrag.thresholdPercent && volume.mediaType !== 'SSD') {
       issues.push({
         id: `fragmented-${volume.letter}`,
         title: `${volume.letter} is ${percent}% fragmented`,
@@ -202,7 +213,7 @@ function actionCenterIssues(): ActionCenterIssue[] {
     })
   }
   for (const disk of health?.physicalDisks ?? []) {
-    const unhealthy = disk.health && !/healthy/i.test(disk.health)
+    const unhealthy = /^(warning|unhealthy)$/i.test(disk.health.trim())
     const wornOut = disk.wear !== null && disk.wear >= 90
     if (unhealthy || wornOut) {
       issues.push({
@@ -226,13 +237,13 @@ async function appStatus(): Promise<AppStatus> {
     elevated: env.elevated,
     defragEngine: engineAvailable ? (engineText.split(/\r?\n/).find((line) => /Defrag/i.test(line))?.trim() ?? 'defrag.exe') : 'unavailable',
     engineAvailable,
-    volumes,
+    volumes: store.settings().general.hideRemovable ? volumes.filter((volume) => volume.kind !== 'removable') : volumes,
     health,
     lastJob,
-    lastOptimize: history.find((entry) => entry.action !== 'analyze') ?? null,
+    lastOptimize: history.find((entry) => entry.action !== 'analyze' && entry.state === 'completed' && !entry.dryRun && entry.exitCode === 0) ?? null,
     onBattery: powerMonitor.isOnBatteryPower?.() ?? false,
     scheduledNext: scheduledNextRun(),
-    bootPending: store.settings().bootOptimize.enabled,
+    pendingPowerAction: pendingPowerAction && { action: pendingPowerAction.action, dueAt: pendingPowerAction.dueAt },
     issues: actionCenterIssues(),
     stats: store.stats()
   }
@@ -243,63 +254,58 @@ async function emitStatus(): Promise<void> {
 }
 
 function applyVolumeResult(job: DefragJob): void {
-  const letter = job.volume.slice(0, 1).toUpperCase()
-  const volume = volumes.find((v) => v.letter === letter)
+  if (job.state !== 'completed' || job.dryRun) return
+  const volume = findVolume(job.volume)
   if (!volume) return
   if (job.statsAfter) volume.fragmentation = job.statsAfter
-  if (job.action !== 'analyze' && job.state === 'completed') {
+  if (job.action !== 'analyze') {
+    if (!job.statsAfter) volume.fragmentation = null
     volume.lastOptimizedAt = job.finishedAt ?? nowIso()
     volume.lastAction = ACTION_LABELS[job.action]
+    store.recordVolume(volume.id, volume.lastAction, job.statsAfter?.totalFragmentedSpacePercent ?? null)
   }
 }
 
-async function afterJob(job: DefragJob): Promise<void> {
-  applyVolumeResult(job)
-  if (job.action !== 'analyze' && job.state === 'completed') {
-    const volume = volumes.find((v) => v.letter === job.volume.slice(0, 1).toUpperCase())
-    if (volume) store.recordVolume(volume.letter ?? job.volume, ACTION_LABELS[job.action], job.statsAfter?.totalFragmentedSpacePercent ?? null)
-    store.addBytesOptimized(0)
-  }
-  const settings = store.settings()
-  if (settings.afterTask.action !== 'none' && job.state === 'completed') {
-    armPowerAction(settings.afterTask.action, settings.afterTask.delaySeconds)
-  }
-  if (settings.notifications.optimizeComplete) {
-    notify(
-      `${ACTION_LABELS[job.action]} ${job.state === 'completed' ? 'finished' : job.state}`,
-      `${job.volume} — ${job.state === 'completed' ? 'completed' : job.error ?? job.elevationHint ?? job.state}`
-    )
-  }
-  await emitStatus()
+function findVolume(identifier: string): VolumeInfo | undefined {
+  const key = identifier.replace(/\\$/, '').toUpperCase()
+  return volumes.find((volume) => (volume.letter && `${volume.letter}:` === key) || volume.id.replace(/\\$/, '').toUpperCase() === key)
 }
 
-function armPowerAction(action: string, delaySeconds: number): void {
+function armPowerAction(action: PowerAction, delaySeconds: number): void {
   cancelPowerAction()
   const delay = Math.max(10, delaySeconds) * 1000
-  broadcast('ultra:notify', {
-    title: `PC will ${action} in ${Math.round(delay / 1000)}s`,
-    body: 'Cancel from the notification area before the countdown ends.',
-    level: 'warn'
-  })
+  const title = `PC will ${action} in ${Math.round(delay / 1000)}s`
+  if (Notification.isSupported()) {
+    const notification = new Notification({ title, body: 'Click to cancel this power action.' })
+    notification.on('click', () => { if (pendingPowerAction?.timer === timer) cancelPowerAction() })
+    notification.show()
+  }
   const timer = setTimeout(() => {
     pendingPowerAction = null
-    const commands: Record<string, [string, string[]]> = {
-      shutdown: ['shutdown', ['/s', '/t', '0']],
-      restart: ['shutdown', ['/r', '/t', '0']],
-      sleep: ['rundll32.exe', ['powrprof.dll,SetSuspendState', '0,1,0']],
-      hibernate: ['shutdown', ['/h']]
-    }
-    const entry = commands[action]
-    if (entry) void run(entry[0], entry[1], 30_000)
+    void emitStatus()
+    void executePowerAction(action)
   }, delay)
   pendingPowerAction = { action, dueAt: Date.now() + delay, timer }
+  void emitStatus()
 }
 
 function cancelPowerAction(): boolean {
   if (!pendingPowerAction) return false
   clearTimeout(pendingPowerAction.timer)
   pendingPowerAction = null
+  void emitStatus()
   return true
+}
+
+async function executePowerAction(action: PowerAction): Promise<void> {
+  const result = action === 'sleep'
+    ? await runPowerShell("Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop; if (-not [Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)) { throw 'Windows refused to sleep' }", 30_000)
+    : await run(systemExecutable('shutdown.exe'), action === 'hibernate' ? ['/h'] : [action === 'restart' ? '/r' : '/s', '/t', '0'], 30_000)
+  if (!result.ok) {
+    const message = (result.stderr || result.stdout).trim() || `Windows returned ${result.code}`
+    store.addLog('app', 'error', `Power action failed: ${action}`, message)
+    notify(`Could not ${action} the PC`, message)
+  }
 }
 
 async function silentModeActive(): Promise<boolean> {
@@ -316,24 +322,56 @@ async function silentModeActive(): Promise<boolean> {
   return active
 }
 
-async function startQueued(requests: DefragRequest[]): Promise<DefragJob[]> {
-  const jobs: DefragJob[] = []
-  for (const request of requests) {
-    const job = await runner.run(request)
-    jobs.push(job)
-    lastJob = job
-    applyVolumeResult(job)
+async function startQueued(requests: DefragRequest[], scheduledShutdown = false, notifyEach = true): Promise<DefragJob[]> {
+  if (batchRunning) throw new Error('A disk operation is already running.')
+  if (!Array.isArray(requests) || requests.some((request) => !request || typeof request.volume !== 'string' ||
+      (request.dryRun !== undefined && typeof request.dryRun !== 'boolean') ||
+      (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string'))))) {
+    throw new Error('Invalid disk operation request.')
   }
-  await emitStatus()
-  return jobs
+  batchRunning = true
+  batchCancelled = false
+  const realWork = requests.some((request) => !request.dryRun)
+  if (realWork) cancelPowerAction()
+  const jobs: DefragJob[] = []
+  try {
+    for (const request of requests) {
+      if (batchCancelled || quitting) break
+      const job = await runner.run(request)
+      jobs.push(job)
+      if (notifyEach && !job.dryRun && job.action !== 'analyze' && job.state === 'completed' && store.settings().notifications.optimizeComplete) {
+        notify(`${ACTION_LABELS[job.action]} finished`, `${job.volume} completed`)
+      }
+    }
+    if (realWork && !quitting && !batchCancelled && jobs.length === requests.length && jobs.every((job) => job.state === 'completed') && jobs.some((job) => !job.dryRun && job.action !== 'analyze')) {
+      const { action, delaySeconds } = store.settings().afterTask
+      if (scheduledShutdown) armPowerAction('shutdown', 60)
+      else if (action !== 'none') armPowerAction(action, delaySeconds)
+    }
+    return jobs
+  } finally {
+    batchRunning = false
+    await emitStatus()
+  }
 }
 
 async function tickScheduler(): Promise<void> {
+  if (schedulerRunning || batchRunning || !env.elevated || !engineAvailable || quitting) return
+  schedulerRunning = true
+  try {
+    await runScheduledWork()
+  } finally {
+    schedulerRunning = false
+  }
+}
+
+async function runScheduledWork(): Promise<void> {
   const settings = store.settings()
+  if (!settings.scheduled.enabled && !settings.autoDefrag.enabled) return
   const onBattery = powerMonitor.isOnBatteryPower?.() ?? false
-  if (onBattery && settings.defrag.batteryGuard && settings.defrag.batteryGuard) return
+  if (onBattery && settings.defrag.batteryGuard) return
   if (await silentModeActive()) return
-  if (runner.current()?.state === 'running') return
+  if (batchRunning || quitting) return
 
   const excluded = new Set(settings.defrag.excludeList.map((letter) => letter.trim().slice(0, 1).toUpperCase()))
   const fixed = volumes.filter(
@@ -341,15 +379,18 @@ async function tickScheduler(): Promise<void> {
       v.kind === 'fixed' &&
       v.fileSystem.toUpperCase() === 'NTFS' &&
       !!v.letter &&
-      !excluded.has(v.letter.toUpperCase()) &&
-      (!settings.general.hideRemovable || v.kind === 'fixed')
+      !excluded.has(v.letter.toUpperCase())
   )
   if (!fixed.length) return
+  const requestFor = (volume: VolumeInfo, action: DefragAction): DefragRequest => ({
+    action: action === 'analyze' ? action : volume.mediaType === 'SSD' ? 'retrim' : action === 'traditional' && volume.mediaType !== 'HDD' ? 'optimize' : action,
+    volume: volume.letter!
+  })
 
   // Scheduled defrag
   if (settings.scheduled.enabled) {
     const now = new Date()
-    const dayKey = now.toISOString().slice(0, 10)
+    const dayKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
     const matchesTime = now.getHours() === settings.scheduled.hour && now.getMinutes() === settings.scheduled.minute
     const matchesCadence =
       settings.scheduled.cadence === 'daily'
@@ -357,32 +398,35 @@ async function tickScheduler(): Promise<void> {
         : settings.scheduled.cadence === 'weekly'
           ? now.getDay() === settings.scheduled.weekday
           : now.getDate() === settings.scheduled.dayOfMonth
-    if (matchesTime && matchesCadence && lastScheduledDay !== dayKey) {
-      lastScheduledDay = dayKey
+    if (matchesTime && matchesCadence && store.automationState().scheduledDay !== dayKey) {
+      store.markAutomationRun({ scheduledDay: dayKey })
       store.addLog('schedule', 'info', 'Scheduled defrag started', `${settings.scheduled.action} on ${fixed.map((v) => v.letter).join(', ')}`)
-      const jobs = await startQueued(fixed.map((v) => ({ action: settings.scheduled.action, volume: v.letter! })))
-      if (settings.scheduled.notify) {
-        notify('Scheduled defrag finished', `${jobs.filter((j) => j.state === 'completed').length}/${jobs.length} volume(s) completed`)
+      const jobs = await startQueued(fixed.map((volume) => requestFor(volume, settings.scheduled.action)), settings.scheduled.shutdownAfter, false)
+      if (settings.scheduled.notify && settings.general.trayNotifications) {
+        notify('Scheduled defrag finished', `${jobs.filter((j) => j.state === 'completed').length}/${fixed.length} volume(s) completed`)
       }
-      if (settings.scheduled.shutdownAfter && jobs.every((j) => j.state === 'completed')) armPowerAction('shutdown', 60)
       return
     }
   }
 
   // Auto defrag while idle: analyze, then optimize anything above the threshold.
-  if (settings.autoDefrag.enabled && env.elevated) {
+  if (settings.autoDefrag.enabled) {
     const idleSeconds = powerMonitor.getSystemIdleTime()
     if (idleSeconds < settings.autoDefrag.idleMinutes * 60) return
-    if (Date.now() - lastAutoDefragAt < 6 * 3_600_000) return
-    const analyses = await startQueued(fixed.map((v) => ({ action: 'analyze', volume: v.letter! })))
+    if (Date.now() - store.automationState().autoAt < 6 * 3_600_000) return
+    store.markAutomationRun({ autoAt: Date.now() })
+    const analyses = await startQueued(fixed.map((volume) => requestFor(volume, 'analyze')), false, false)
+    if (batchCancelled || batchRunning || quitting) return
     const targets = analyses
-      .filter((job) => (job.statsAfter?.totalFragmentedSpacePercent ?? 0) >= settings.autoDefrag.thresholdPercent)
-      .map((job) => job.volume)
-    lastAutoDefragAt = Date.now()
+      .filter((job) => job.state === 'completed' && (job.statsAfter?.totalFragmentedSpacePercent ?? 0) >= settings.autoDefrag.thresholdPercent)
+      .flatMap((job) => {
+        const volume = findVolume(job.volume)
+        return volume ? [requestFor(volume, settings.autoDefrag.action)] : []
+      })
     if (targets.length) {
-      store.addLog('schedule', 'info', 'Auto Defrag', `${targets.join(', ')} above ${settings.autoDefrag.thresholdPercent}%`)
-      const jobs = await startQueued(targets.map((volume) => ({ action: settings.autoDefrag.action, volume })))
-      if (settings.autoDefrag.notify) notify('Auto Defrag finished', `${jobs.filter((j) => j.state === 'completed').length}/${jobs.length} volume(s) optimized`)
+      store.addLog('schedule', 'info', 'Auto Defrag', `${targets.map((target) => target.volume).join(', ')} at or above ${settings.autoDefrag.thresholdPercent}%`)
+      const jobs = await startQueued(targets, false, false)
+      if (settings.autoDefrag.notify && settings.general.trayNotifications) notify('Auto Defrag finished', `${jobs.filter((j) => j.state === 'completed').length}/${targets.length} volume(s) optimized`)
     }
   }
 }
@@ -404,7 +448,7 @@ function createWindow(): void {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false
     }
   })
@@ -416,14 +460,22 @@ function createWindow(): void {
       mainWindow?.hide()
     }
   })
+  mainWindow.on('closed', () => { mainWindow = null })
 
-  if (isDev && process.env.ELECTRON_RENDERER_URL) void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else void mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+  const rendererPath = path.join(__dirname, '../renderer/index.html')
+  const devUrl = isDev ? process.env.ELECTRON_RENDERER_URL : undefined
+  const rendererUrl = new URL(devUrl ?? pathToFileURL(rendererPath).href)
+  const wc = mainWindow.webContents
+  const preventNavigation = (event: Electron.Event): void => event.preventDefault()
+  wc.on('will-frame-navigate', preventNavigation)
+  wc.on('will-redirect', preventNavigation)
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    if (/^https:\/\//i.test(url)) void shell.openExternal(url).catch(console.error)
     return { action: 'deny' }
   })
+  if (devUrl) void mainWindow.loadURL(rendererUrl.href)
+  else void mainWindow.loadFile(rendererPath)
 }
 
 function createTray(): void {
@@ -445,7 +497,7 @@ function createTray(): void {
         click: () => {
           mainWindow?.show()
           broadcast('ultra:navigate', 'defrag')
-          void startQueued(volumes.filter((v) => v.letter && v.kind === 'fixed').map((v) => ({ action: 'analyze', volume: v.letter! })))
+          if (!batchRunning) void startQueued(volumes.filter((v) => v.letter && v.kind === 'fixed').map((v) => ({ action: 'analyze', volume: v.letter! })))
         }
       },
       {
@@ -453,10 +505,11 @@ function createTray(): void {
         click: () => {
           mainWindow?.show()
           broadcast('ultra:navigate', 'defrag')
-          void startQueued(volumes.filter((v) => v.letter && v.kind === 'fixed').map((v) => ({ action: 'optimize', volume: v.letter! })))
+          if (!batchRunning) void startQueued(volumes.filter((v) => v.letter && v.kind === 'fixed').map((v) => ({ action: 'optimize', volume: v.letter! })))
         }
       },
       { type: 'separator' },
+      { label: 'Cancel pending power action', click: () => { cancelPowerAction() } },
       { label: 'Exit', click: () => app.quit() }
     ])
   )
@@ -468,147 +521,157 @@ function createTray(): void {
 
 async function relaunchElevated(): Promise<{ ok: boolean; message: string }> {
   if (env.elevated) return { ok: true, message: 'Already running elevated' }
+  if (batchRunning) return { ok: false, message: 'Wait for the current disk operation to finish.' }
   const exe = process.execPath
-  const args = app.isPackaged ? [] : [app.getAppPath()]
+  const args = [...(app.isPackaged ? [] : [`"${app.getAppPath()}"`]), `--wait-for-pid=${process.pid}`]
   const quotedExe = `'${exe.replace(/'/g, "''")}'`
-  const argList = args.length ? `-ArgumentList ${args.map((a) => `'${a.replace(/'/g, "''")}'`).join(',')}` : ''
-  const script = `Start-Process -FilePath ${quotedExe} ${argList} -Verb RunAs`
-  const result = await run('powershell.exe', ['-NoProfile', '-Command', script], 30_000)
+  const argList = args.map((arg) => `'${arg.replace(/'/g, "''")}'`).join(',')
+  const script = `Start-Process -FilePath ${quotedExe} -ArgumentList ${argList} -Verb RunAs -ErrorAction Stop`
+  const result = await runPowerShell(script, 120_000)
   if (!result.ok) {
     const message = `${result.stderr || result.stdout}`.trim() || 'The elevation request was dismissed'
     store.addLog('app', 'warn', 'Elevation request failed', message)
     return { ok: false, message }
   }
-  quitting = true
-  setTimeout(() => app.quit(), 800)
+  setTimeout(() => app.quit(), 100)
   return { ok: true, message: 'Elevated instance starting' }
 }
 
+function applySettingsChange(before: Settings, next: Settings): void {
+  if (before.general.autoStart !== next.general.autoStart) {
+    const args = app.isPackaged ? [] : [app.getAppPath()]
+    app.setLoginItemSettings({ name: APP_ID, openAtLogin: next.general.autoStart, path: process.execPath, args })
+  }
+  if (before.afterTask.action !== next.afterTask.action || before.afterTask.delaySeconds !== next.afterTask.delaySeconds ||
+      (before.scheduled.shutdownAfter && !next.scheduled.shutdownAfter)) cancelPowerAction()
+  silentCache = { at: 0, active: false }
+}
+
 function registerIpc(): void {
+  const trusted = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean =>
+    !!mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame
+  const handle: typeof ipcMain.handle = (channel, listener) => {
+    ipcMain.handle(channel, (event, ...args) => {
+      if (!trusted(event)) throw new Error('Untrusted IPC sender')
+      return listener(event, ...args)
+    })
+  }
   ipcMain.on('ultra:win', (event, action: 'minimize' | 'maximize' | 'close') => {
+    if (!trusted(event)) return
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
     if (action === 'minimize') win.minimize()
     else if (action === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize()
-    else win.close()
+    else if (action === 'close') win.close()
   })
 
-  ipcMain.handle('ultra:status', () => appStatus())
-  ipcMain.handle('ultra:volumes:refresh', async () => {
+  handle('ultra:status', () => appStatus())
+  handle('ultra:volumes:refresh', async () => {
     await detectEnv()
     await refreshVolumes(true)
     await emitStatus()
     return appStatus()
   })
-  ipcMain.handle('ultra:settings', () => store.settings())
-  ipcMain.handle('ultra:settings:save', async (_e, patch: DeepPartial<Settings>) => {
+  handle('ultra:settings', () => store.settings())
+  handle('ultra:settings:save', async (_event, patch: DeepPartial<Settings>) => {
     const before = store.settings()
     const next = await store.updateSettings(patch)
-    if (before.general.autoStart !== next.general.autoStart) {
-      app.setLoginItemSettings({ openAtLogin: next.general.autoStart, path: process.execPath })
-    }
-    silentCache = { at: 0, active: false }
+    applySettingsChange(before, next)
     await emitStatus()
     return next
   })
-  ipcMain.handle('ultra:settings:reset', async () => {
+  handle('ultra:settings:reset', async () => {
+    const before = store.settings()
     const next = await store.resetSettings()
+    applySettingsChange(before, next)
     await emitStatus()
     return next
   })
-
-  ipcMain.handle('ultra:analyze', async (_e, volume: string, dryRun?: boolean) => {
-    const job = await runner.run({ action: 'analyze', volume, dryRun })
-    lastJob = job
-    applyVolumeResult(job)
-    await emitStatus()
-    return job
+  handle('ultra:analyze', async (_event, volume: string, dryRun?: boolean) =>
+    (await startQueued([{ action: 'analyze', volume, dryRun }]))[0])
+  handle('ultra:job:start', async (_event, request: DefragRequest) => (await startQueued([request]))[0])
+  handle('ultra:jobs:start', (_event, requests: DefragRequest[]) => startQueued(requests))
+  handle('ultra:job:cancel', () => {
+    if (batchRunning) batchCancelled = true
+    runner.cancel()
   })
-  ipcMain.handle('ultra:job:start', async (_e, request: DefragRequest) => {
-    const job = await runner.run(request)
-    lastJob = job
-    await afterJob(job)
-    return job
-  })
-  ipcMain.handle('ultra:job:cancel', () => runner.cancel())
-  ipcMain.handle('ultra:job:current', () => runner.current())
-  ipcMain.handle('ultra:job:preview', (_e, request: DefragRequest): DefragCommand => runner.preview(request))
-  ipcMain.handle('ultra:history', () => store.historyEntries())
+  handle('ultra:power:cancel', () => cancelPowerAction())
+  handle('ultra:job:current', () => runner.current())
+  handle('ultra:job:preview', (_e, request: DefragRequest): DefragCommand => runner.preview(request))
+  handle('ultra:history', () => store.historyEntries())
 
-  ipcMain.handle('ultra:health', async () => {
+  handle('ultra:health', async () => {
     health = await diskHealth(volumes)
     return health
   })
-  ipcMain.handle('ultra:libraries', async () => detectLibraries(volumes, store.libraries()))
-  ipcMain.handle('ultra:libraries:add', async (_e, target: string) => {
+  handle('ultra:libraries', async () => detectLibraries(volumes, store.libraries()))
+  handle('ultra:libraries:add', async (_e, target: string) => {
     await store.addLibrary(target)
     return store.libraries()
   })
-  ipcMain.handle('ultra:libraries:remove', async (_e, target: string) => {
+  handle('ultra:libraries:remove', async (_e, target: string) => {
     await store.removeLibrary(target)
     return store.libraries()
   })
-  ipcMain.handle('ultra:largefiles', async (_e, options: { volume?: string; root?: string; minSizeMb: number; limit: number }) => {
-    const { scanLargeFiles } = await import('./engine/libraries')
+  handle('ultra:largefiles', async (_e, options: { volume?: string; root?: string; minSizeMb: number; limit: number }) => {
     const result = await scanLargeFiles(options)
     const where = options.root ?? options.volume ?? 'C:'
     store.addLog('analyze', 'info', `Large-file scan on ${where}`, `${result.files.length} file(s) ≥ ${options.minSizeMb} MB, ${result.scannedFiles} scanned${result.truncated ? ' (time budget reached)' : ''}`)
-    return result.files as LargeFileEntry[]
+    return result.files
   })
-  ipcMain.handle('ultra:files:defrag', async (_e, volume: string, files: string[], dryRun?: boolean) => {
-    const job = await runner.run({ action: 'files', volume, files, dryRun })
-    lastJob = job
-    await afterJob(job)
-    return job
-  })
+  handle('ultra:files:defrag', async (_event, volume: string, files: string[], dryRun?: boolean) =>
+    (await startQueued([{ action: 'files', volume, files, dryRun }]))[0])
 
-  ipcMain.handle('ultra:actioncenter', () => actionCenterIssues())
-  ipcMain.handle('ultra:fixall', async () => {
+  handle('ultra:actioncenter', () => actionCenterIssues())
+  handle('ultra:fixall', async () => {
     const issues = actionCenterIssues()
-    let fixed = 0
-    for (const issue of issues) {
-      if (issue.fixId === 'enable-automation') {
-        await store.updateSettings({ autoDefrag: { enabled: true }, scheduled: { enabled: true, cadence: 'weekly', weekday: 0, hour: 3, minute: 0 } })
-        fixed++
-      } else if (issue.fixId.startsWith('retrim:')) {
-        const volume = issue.fixId.split(':')[1]
-        const job = await runner.run({ action: 'retrim', volume })
-        if (job.state === 'completed') fixed++
-      } else if (issue.fixId.startsWith('optimize:')) {
-        const volume = issue.fixId.split(':')[1]
-        const job = await runner.run({ action: 'optimize', volume })
-        if (job.state === 'completed') fixed++
-      } else if (issue.fixId === 'analyze' && env.elevated) {
-        const jobs = await startQueued(volumes.filter((v) => v.letter && v.kind === 'fixed').map((v) => ({ action: 'analyze', volume: v.letter! })))
-        if (jobs.some((j) => j.state === 'completed')) fixed++
+    const requests: DefragRequest[] = []
+    if (env.elevated && engineAvailable) {
+      for (const issue of issues) {
+        if (issue.fixId === 'analyze') {
+          requests.push(...volumes.filter((volume) => volume.letter && volume.kind === 'fixed')
+            .map((volume): DefragRequest => ({ action: 'analyze', volume: volume.letter! })))
+        } else {
+          const [action, volume] = issue.fixId.split(':')
+          if (volume && (action === 'retrim' || action === 'optimize')) requests.push({ action, volume })
+        }
       }
+    }
+    const jobs = requests.length ? await startQueued(requests) : []
+    let fixed = jobs.filter((job) => job.action !== 'analyze' && job.state === 'completed').length
+    if (jobs.some((job) => job.action === 'analyze' && job.state === 'completed')) fixed++
+    if (issues.some((issue) => issue.fixId === 'enable-automation')) {
+      await store.updateSettings({ autoDefrag: { enabled: true }, scheduled: { enabled: true } })
+      fixed++
     }
     store.addLog('app', 'info', 'Fix All completed', `${fixed} of ${issues.length} issue(s) addressed`)
     await emitStatus()
     return { fixed, issues: issues.length }
   })
 
-  ipcMain.handle('ultra:logs', (_e, channel?: LogEntry['channel']) => store.getLogs(channel))
-  ipcMain.handle('ultra:logs:clear', () => store.clearLogs())
+  handle('ultra:logs', (_e, channel?: LogEntry['channel']) => store.getLogs(channel))
+  handle('ultra:logs:clear', () => store.clearLogs())
 
-  ipcMain.handle('ultra:relaunch', () => relaunchElevated())
-  ipcMain.handle('ultra:pick', async (_e, kind: 'file' | 'folder' | 'files') => {
+  handle('ultra:relaunch', () => relaunchElevated())
+  handle('ultra:pick', async (_e, kind: 'file' | 'folder' | 'files') => {
     const result = await dialog.showOpenDialog(mainWindow ?? undefined!, {
       properties: kind === 'folder' ? ['openDirectory', 'multiSelections'] : kind === 'files' ? ['openFile', 'multiSelections'] : ['openFile'],
       title: kind === 'folder' ? 'Select a folder' : 'Select a file'
     })
     return result.canceled ? [] : result.filePaths
   })
-  ipcMain.handle('ultra:open', async (_e, target: string) => {
-    await shell.openPath(target)
+  handle('ultra:open', async (_e, target: string) => {
+    if (!path.isAbsolute(target) || !(await fs.stat(target)).isDirectory()) throw new Error('Choose an existing folder.')
+    const error = await shell.openPath(target)
+    if (error) throw new Error(error)
   })
-  ipcMain.handle('ultra:show', (_e, target: string) => {
+  handle('ultra:show', (_e, target: string) => {
     shell.showItemInFolder(target)
   })
 }
 
 async function bootstrap(): Promise<void> {
-  paths = createPaths(app.getPath('userData'))
+  const paths = createPaths(app.getPath('userData'))
   await ensureDirs(paths)
   store = new Store(paths)
   await store.init()
@@ -626,10 +689,11 @@ async function bootstrap(): Promise<void> {
       lastJob = job
       broadcast('ultra:job', job)
     },
+    mediaForVolume: (volume) => findVolume(volume)?.mediaType ?? 'Unknown',
     onLog: (channel, level, message, detail) => store.addLog(channel, level, message, detail),
     onFinished: (job, history: OptimizeHistoryEntry) => {
       void store.addHistory(history)
-      void afterJob(job)
+      applyVolumeResult(job)
     }
   })
 
@@ -637,7 +701,7 @@ async function bootstrap(): Promise<void> {
 
   schedulerTimer = setInterval(() => {
     void tickScheduler().catch((err: unknown) => store.addLog('schedule', 'error', 'Scheduler tick failed', err instanceof Error ? err.message : String(err)))
-  }, 60_000)
+  }, 30_000)
   schedulerTimer.unref?.()
   setTimeout(() => void emitStatus(), 500).unref?.()
 
@@ -646,15 +710,32 @@ async function bootstrap(): Promise<void> {
   createTray()
   await emitStatus()
 
-  setInterval(() => {
-    void refreshVolumes().then(() => emitStatus())
-  }, 60_000).unref?.()
+  refreshTimer = setInterval(() => {
+    void refreshVolumes().then(emitStatus).catch((err: unknown) =>
+      store.addLog('health', 'error', 'Unable to refresh volumes', String(err)))
+  }, 60_000)
+  refreshTimer.unref?.()
 }
 
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
-} else {
+async function launch(): Promise<void> {
+  const previousPid = Number(app.commandLine.getSwitchValue('wait-for-pid'))
+  if (Number.isSafeInteger(previousPid) && previousPid > 0 && previousPid !== process.pid) {
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      try {
+        process.kill(previousPid, 0)
+      } catch {
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+
+  if (!app.requestSingleInstanceLock()) {
+    app.quit()
+    return
+  }
+
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -662,23 +743,38 @@ if (!gotLock) {
       mainWindow.focus()
     }
   })
-  app.setAppUserModelId('work.selman.ultra-harddisk-defrag')
+  app.setAppUserModelId(APP_ID)
 
-  app.whenReady().then(async () => {
-    await bootstrap()
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
-      else mainWindow?.show()
-    })
-  })
-
-  app.on('before-quit', () => {
+  let readyToQuit = false
+  app.on('before-quit', (event) => {
+    if (readyToQuit) return
+    event.preventDefault()
+    if (quitting) return
     quitting = true
     if (schedulerTimer) clearInterval(schedulerTimer)
+    if (refreshTimer) clearInterval(refreshTimer)
     cancelPowerAction()
+    runner?.cancel()
+    void (store?.flush() ?? Promise.resolve()).finally(() => {
+      readyToQuit = true
+      app.quit()
+    })
   })
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin' && !store?.settings().general.minimizeToTray) app.quit()
   })
+
+  await app.whenReady()
+  await bootstrap()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    else mainWindow?.show()
+  })
 }
+
+void launch().catch((error: unknown) => {
+  console.error('Unable to start Ultra Harddisk Defrag', error)
+  dialog.showErrorBox('Ultra Harddisk Defrag', error instanceof Error ? error.message : String(error))
+  app.exit(1)
+})

@@ -19,6 +19,7 @@ import {
   Zap
 } from 'lucide-react'
 import type { DefragAction, DefragCommand, DefragJob, OptimizeHistoryEntry } from '@shared/types'
+import { requiresHdd } from '@shared/types'
 import { useApp } from '../lib/context'
 import { api } from '../api'
 import { ACTION_HINTS, ACTION_LABELS, formatBytes, formatDate, formatDuration, formatNumber } from '../lib/format'
@@ -66,14 +67,17 @@ export default function DefragPage(): React.JSX.Element {
   }, [volumes, volume])
 
   React.useEffect(() => {
-    void api.previewCommand({ action, volume }).then(setPreview).catch(() => setPreview(null))
+    let current = true
+    setPreview(null)
+    void api.previewCommand({ action, volume }).then((command) => { if (current) setPreview(command) }).catch(() => undefined)
+    return () => { current = false }
   }, [action, volume])
 
   React.useEffect(() => {
     void api.getHistory().then(setHistory)
   }, [job?.finishedAt])
 
-  const stats = job?.statsAfter ?? selected?.fragmentation ?? null
+  const stats = selected?.fragmentation ?? null
   const percent = live?.percent ?? job?.percent ?? 0
   const logLines = job?.lines ?? []
 
@@ -154,24 +158,23 @@ export default function DefragPage(): React.JSX.Element {
               <span className="sub">Default is chosen for the media type</span>
               <div className="right">
                 <Pill tone={selected?.mediaType === 'SSD' ? 'teal' : 'amber'}>
-                  {selected?.mediaType === 'SSD' ? 'SSD: trim, never defrag' : 'HDD: real defrag'}
+                  {selected?.mediaType === 'SSD' ? 'SSD · TRIM' : selected?.mediaType === 'HDD' ? 'HDD' : 'Media type unavailable'}
                 </Pill>
               </div>
             </div>
             <div style={{ padding: 16 }}>
               <div className="action-grid">
                 {TILES.map((tile) => {
-                  const disabled = !selected?.letter || (tile.action === 'retrim' && selected?.mediaType !== 'SSD') || live !== null
+                  const hddRequired = requiresHdd(tile.action) && selected?.mediaType !== 'HDD'
+                  const disabled = !selected?.letter || hddRequired || live !== null
                   return (
                     <button
                       key={tile.action}
                       className="action-btn"
+                      aria-pressed={action === tile.action}
                       disabled={disabled}
-                      onClick={() => {
-                        setAction(tile.action)
-                        void runJob({ action: tile.action, volume })
-                      }}
-                      title={tile.action === 'retrim' && selected?.mediaType !== 'SSD' ? 'TRIM only applies to SSDs' : ACTION_HINTS[tile.action]}
+                      onClick={() => setAction(tile.action)}
+                      title={hddRequired ? 'Requires a detected HDD' : ACTION_HINTS[tile.action]}
                     >
                       <span className="glyph">{tile.icon}</span>
                       <strong>{ACTION_LABELS[tile.action]}</strong>
@@ -189,16 +192,18 @@ export default function DefragPage(): React.JSX.Element {
                 </div>
                 <button
                   className="btn teal sm"
-                  disabled={!selected || live !== null}
-                  onClick={async () => {
-                    const result = await api.startJob({ action, volume, dryRun: true })
-                    if (result.state === 'completed') {
-                      setHistory(await api.getHistory())
-                    }
-                  }}
+                  disabled={!selected || !preview || live !== null}
+                  onClick={() => void runJob({ action, volume, dryRun: true })}
                   title="Validate the command without touching the disk"
                 >
                   Dry run
+                </button>
+                <button
+                  className="btn primary sm"
+                  disabled={!selected || !preview || live !== null}
+                  onClick={() => void runJob({ action, volume })}
+                >
+                  <Play size={13} /> Run operation
                 </button>
               </div>
               {selected?.mediaType === 'SSD' && (action === 'traditional' || action === 'freeSpace') ? (
@@ -303,7 +308,7 @@ export default function DefragPage(): React.JSX.Element {
               </div>
               <div className="row" style={{ gap: 8 }}>
                 <Power size={14} color="var(--violet)" />
-                <span><b style={{ color: 'var(--text)' }}>Boot files:</b> <code className="mono">/B</code> asks Windows to optimize the boot files at the next restart, because they are locked while running.</span>
+                <span><b style={{ color: 'var(--text)' }}>Boot files:</b> <code className="mono">/B</code> runs Windows boot-file optimization on a detected HDD.</span>
               </div>
               <div className="row" style={{ gap: 8 }}>
                 <AlertTriangle size={14} color="var(--rose)" />
@@ -317,7 +322,7 @@ export default function DefragPage(): React.JSX.Element {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-head">
           <h3>History</h3>
-          <span className="sub">Last 100 runs kept in %APPDATA%\Ultra Harddisk Defrag\history.json</span>
+          <span className="sub">Last 100 runs</span>
         </div>
         {history.length === 0 ? (
           <EmptyState icon={<Play size={22} />} title="No runs recorded" detail="Completed, cancelled and refused operations all appear here." />
@@ -348,7 +353,7 @@ export default function DefragPage(): React.JSX.Element {
                       {entry.fragmentedPercentBefore ?? '—'}% → {entry.fragmentedPercentAfter ?? '—'}%
                     </td>
                     <td className="mono">{entry.exitCode ?? '—'}</td>
-                    <td><Pill tone={stateTone(entry.state)}>{entry.state}</Pill></td>
+                    <td><Pill tone={entry.dryRun ? 'muted' : stateTone(entry.state)}>{entry.dryRun ? 'dry run' : entry.state}</Pill></td>
                   </tr>
                 ))}
               </tbody>

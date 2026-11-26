@@ -18,7 +18,7 @@ function severityIcon(severity: ActionCenterIssue['severity']): React.JSX.Elemen
 }
 
 export default function ActionCenterPage(): React.JSX.Element {
-  const { status, runJob, elevate, pushToast, refreshStatus } = useApp()
+  const { status, runJob, runJobs, saveSettings, elevate, pushToast, refreshStatus } = useApp()
   const [working, setWorking] = React.useState(false)
   const issues = status?.issues ?? []
 
@@ -32,6 +32,8 @@ export default function ActionCenterPage(): React.JSX.Element {
         level: result.fixed ? 'success' : 'warn'
       })
       await refreshStatus()
+    } catch (error) {
+      pushToast({ title: 'Fix All could not run', body: String(error), level: 'error' })
     } finally {
       setWorking(false)
     }
@@ -47,13 +49,12 @@ export default function ActionCenterPage(): React.JSX.Element {
       return
     }
     if (issue.fixId === 'enable-automation') {
-      await api.saveSettings({ autoDefrag: { enabled: true }, scheduled: { enabled: true } })
-      await refreshStatus()
+      await saveSettings({ autoDefrag: { enabled: true }, scheduled: { enabled: true } })
       return
     }
     if (issue.fixId === 'analyze') {
       const targets = (status?.volumes ?? []).filter((v) => v.letter && v.kind === 'fixed')
-      for (const volume of targets) await runJob({ action: 'analyze', volume: volume.letter! })
+      await runJobs(targets.map((volume) => ({ action: 'analyze', volume: volume.letter! })))
       return
     }
     const [action, volume] = issue.fixId.split(':')

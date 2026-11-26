@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
@@ -7,9 +7,12 @@ import type {
   DefragJob,
   DefragRequest,
   FragmentationStats,
+  MediaType,
   OptimizeHistoryEntry
 } from '../../shared/types'
 import { nowIso, uid } from './runtime'
+import { run, systemExecutable } from './shell'
+import { requiresHdd } from '../../shared/types'
 
 const DEFRAG = 'defrag.exe'
 
@@ -26,10 +29,15 @@ export const ACTION_LABELS: Record<DefragAction, string> = {
 }
 
 /** Only real operations defrag.exe understands; no invented flags. */
-export function buildCommand(request: DefragRequest): DefragCommand {
+export function buildCommand(request: DefragRequest, media?: MediaType): DefragCommand {
   const volume = normaliseVolume(request.volume)
+  if (request.action === 'files' && !(request.files ?? []).length) throw new Error('No files selected for a targeted defrag')
+  if (media !== undefined && media !== 'HDD' && requiresHdd(request.action)) {
+    throw new Error('This operation requires a volume identified as an HDD. Choose Optimize for automatic media selection.')
+  }
   const args: string[] = [volume]
-  switch (request.action) {
+  const action = media === 'SSD' && ['optimize', 'quick'].includes(request.action) ? 'retrim' : request.action
+  switch (action) {
     case 'analyze':
       args.push('/A', '/V')
       break
@@ -56,16 +64,19 @@ export function buildCommand(request: DefragRequest): DefragCommand {
       args.push('/B')
       break
     case 'files': {
-      const files = (request.files ?? []).filter(Boolean)
-      if (!files.length) throw new Error('No files selected for a targeted defrag')
+      const files = request.files!
+      if (filesOnVolume(files, volume).rejected.length) throw new Error('Select literal, absolute file paths on the requested drive.')
       args.push('/D', '/U', '/File', ...files)
       break
     }
     default:
       throw new Error(`Unsupported action: ${String(request.action)}`)
   }
-  return { executable: DEFRAG, args, display: `${DEFRAG} ${args.map(quote).join(' ')}` }
+  const argumentText = args.map(quote).join(' ')
+  if (argumentText.length > 30_000) throw new Error('Select fewer files for this operation.')
+  return { executable: DEFRAG, args, display: `${DEFRAG} ${argumentText}` }
 }
+
 
 function quote(value: string): string {
   return /\s/.test(value) ? `"${value}"` : value
@@ -75,7 +86,7 @@ export function normaliseVolume(input: string): string {
   const trimmed = (input ?? '').trim()
   const drive = trimmed.match(/^([A-Za-z]):?(\\|\/)?$/)
   if (drive) return `${drive[1].toUpperCase()}:`
-  if (/^\\\\\?\\Volume\{[0-9a-fA-F-]+\}\\?$/.test(trimmed)) return trimmed
+  if (/^\\\\\?\\Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}\\?$/i.test(trimmed)) return trimmed
   throw new Error(`Unsupported volume identifier: ${input}`)
 }
 
@@ -86,10 +97,13 @@ export interface ParsedStats {
 }
 
 const NUMBER = '([\\d.,]+)'
+const POST_REPORT = /^[\t ]*Post-(?:Optimization|Defragmentation) Report[^\r\n]*$/im
+const PRE_REPORT = /^[\t ]*Pre-(?:Optimization|Defragmentation) Report[^\r\n]*$/im
 
 export function parseDefragOutput(text: string): ParsedStats {
+  const report = text.split(POST_REPORT).at(-1) ?? text
   const grab = (pattern: RegExp): number | null => {
-    const match = text.match(pattern)
+    const match = report.match(pattern)
     if (!match) return null
     const value = Number(match[1].replace(/[,\s]/g, ''))
     return Number.isFinite(value) ? value : null
@@ -103,8 +117,8 @@ export function parseDefragOutput(text: string): ParsedStats {
   const averageFragmentsPerFolder = grab(new RegExp(`Average fragments per folder\\s*=\\s*${NUMBER}`, 'i'))
   const scatteredFiles = grab(new RegExp(`Total scattered files\\s*=\\s*${NUMBER}`, 'i'))
   const freeSpacePercent = grab(new RegExp(`Percent free space\\s*=\\s*${NUMBER}\\s*%`, 'i'))
-  const volumeSizeText = text.match(/Volume size\s*=\s*([^\r\n]+)/i)?.[1]?.trim() ?? null
-  const clusterSizeText = text.match(/Cluster size\s*=\s*([^\r\n]+)/i)?.[1]?.trim() ?? null
+  const volumeSizeText = report.match(/Volume size\s*=\s*([^\r\n]+)/i)?.[1]?.trim() ?? null
+  const clusterSizeText = report.match(/Cluster size\s*=\s*([^\r\n]+)/i)?.[1]?.trim() ?? null
 
   const hasStats = totalFragmentedSpacePercent !== null || fragmentedFiles !== null
   const stats: FragmentationStats | null = hasStats
@@ -142,6 +156,7 @@ export function looksLikeElevationError(text: string): boolean {
 
 export interface RunnerHooks {
   elevated: boolean
+  mediaForVolume?(volume: string): MediaType
   onProgress(job: DefragJob): void
   onLog(channel: 'optimize' | 'analyze', level: 'info' | 'warn' | 'error', message: string, detail?: string): void
   onFinished?(job: DefragJob, history: OptimizeHistoryEntry): void
@@ -165,27 +180,30 @@ export class DefragRunner {
   }
 
   preview(request: DefragRequest): DefragCommand {
-    return buildCommand(request)
+    return buildCommand(request, this.hooks.mediaForVolume?.(normaliseVolume(request.volume)))
   }
 
   cancel(): void {
     if (this.job && this.job.state === 'running') {
       this.cancelRequested = true
-      const pid = this.child?.pid
-      if (pid) {
-        void import('node:child_process').then(({ execFile }) => {
-          execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => undefined)
+      const child = this.child
+      if (child?.pid) {
+        execFile(systemExecutable('taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, (error) => {
+          if (error && this.child === child) {
+            this.cancelRequested = false
+            this.hooks.onLog('optimize', 'warn', 'Unable to stop the optimizer', error.message)
+          }
         })
       }
     }
   }
 
   async run(request: DefragRequest): Promise<DefragJob> {
-    if (this.job?.state === 'running') return this.job
+    if (this.job?.state === 'running') throw new Error('A disk operation is already running.')
 
     let command: DefragCommand
     try {
-      command = buildCommand(request)
+      command = this.preview(request)
     } catch (err) {
       const failed = this.makeJob(request, 'invalid')
       failed.state = 'failed'
@@ -226,7 +244,17 @@ export class DefragRunner {
     this.hooks.onLog(request.action === 'analyze' ? 'analyze' : 'optimize', 'info', `${ACTION_LABELS[request.action]} started on ${job.volume}`, command.display)
 
     try {
-      await this.spawnDefrag(job, command)
+      if (request.action === 'files') {
+        const available = await Promise.all(request.files!.map(ensureFileExists))
+        if (available.some((exists) => !exists)) throw new Error('One or more selected files are no longer available.')
+      }
+      if (this.cancelRequested) {
+        job.state = 'cancelled'
+        job.phase = 'Cancelled'
+        job.finishedAt = nowIso()
+      } else {
+        await this.spawnDefrag(job, command)
+      }
     } catch (err) {
       job.state = 'failed'
       job.error = err instanceof Error ? err.message : String(err)
@@ -248,6 +276,7 @@ export class DefragRunner {
     return {
       id: uid('job'),
       action: request.action,
+      dryRun: request.dryRun === true,
       volume: normaliseVolumeOrFallback(request.volume),
       state: 'running',
       command: commandText,
@@ -260,43 +289,47 @@ export class DefragRunner {
 
   private spawnDefrag(job: DefragJob, command: DefragCommand): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(command.executable, command.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(systemExecutable(command.executable), command.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
       this.child = child
       let collected = ''
-      let pending = ''
+      const pending = { stdout: '', stderr: '' }
+      let spawnError: Error | undefined
 
-      const consume = (chunk: Buffer): void => {
-        const text = chunk.toString('utf8')
-        collected += text
-        pending += text
-        const parts = pending.split(/[\r\n]+/)
-        pending = parts.pop() ?? ''
+      const consume = (stream: keyof typeof pending, text: string): void => {
+        collected = (collected + text).slice(-128_000)
+        const parts = (pending[stream] + text).split(/[\r\n]+/)
+        pending[stream] = (parts.pop() ?? '').slice(-20_000)
         for (const line of parts) {
           const trimmed = line.trim()
           if (!trimmed) continue
           job.lines.push(trimmed)
           if (job.lines.length > 400) job.lines.splice(0, job.lines.length - 400)
         }
-        const parsed = parseDefragOutput(pending)
+        const progressText = [...parts, pending[stream]].filter((line) => !line.includes('=')).join('\n')
+        const parsed = parseDefragOutput(progressText)
         if (parsed.percent !== null && parsed.percent >= job.percent) job.percent = parsed.percent
         if (parsed.done && job.percent < 99) job.percent = 99
-        job.phase = describePhase(pending, job.action)
+        if (progressText.trim()) job.phase = describePhase(progressText, job.action)
         this.emit()
       }
 
-      child.stdout?.on('data', consume)
-      child.stderr?.on('data', consume)
+      child.stdout.setEncoding('utf8').on('data', (text: string) => consume('stdout', text))
+      child.stderr.setEncoding('utf8').on('data', (text: string) => consume('stderr', text))
 
       child.on('error', (err) => {
-        this.child = null
-        reject(err)
+        spawnError = err
       })
 
       child.on('close', (code) => {
         this.child = null
-        if (pending.trim()) job.lines.push(pending.trim())
-        const text = `${collected}\n${pending}`
-        const parsed = parseDefragOutput(text)
+        if (spawnError) {
+          reject(spawnError)
+          return
+        }
+        for (const tail of Object.values(pending)) {
+          if (tail.trim()) job.lines.push(tail.trim())
+        }
+        const parsed = parseDefragOutput(collected)
 
         if (this.cancelRequested) {
           job.state = 'cancelled'
@@ -308,8 +341,9 @@ export class DefragRunner {
           return
         }
 
-        if (looksLikeElevationError(text) && code !== 0) {
+        if (looksLikeElevationError(collected) && code !== 0) {
           job.state = 'needs-elevation'
+          job.phase = 'Administrator rights required'
           job.elevationHint = 'defrag.exe reported insufficient privileges. Relaunch the app as Administrator.'
           job.finishedAt = nowIso()
           resolve()
@@ -322,7 +356,12 @@ export class DefragRunner {
         job.finishedAt = nowIso()
         job.phase = code === 0 ? 'Finished' : 'Failed'
         if (code !== 0 && !job.error) job.error = job.lines.slice(-3).join(' | ') || `defrag.exe exited with code ${code}`
-        if (job.action === 'analyze' && parsed.stats) job.statsAfter = parsed.stats
+        if (code === 0) {
+          const [firstReport, postReport] = collected.split(POST_REPORT, 2)
+          const preReport = firstReport.split(PRE_REPORT, 2)[1]
+          if (preReport) job.statsBefore = parseDefragOutput(preReport).stats
+          if (parsed.stats && (preReport === undefined || postReport !== undefined)) job.statsAfter = parsed.stats
+        }
         this.hooks.onLog('optimize', code === 0 ? 'info' : 'error', `${ACTION_LABELS[job.action]} ${code === 0 ? 'completed' : 'failed'} on ${job.volume}`, job.error)
         resolve()
       })
@@ -334,11 +373,12 @@ export class DefragRunner {
     return {
       id: job.id,
       action: job.action,
+      dryRun: job.dryRun,
       volume: job.volume,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt ?? nowIso(),
       state: job.state,
-      durationMs: finished - new Date(job.startedAt).getTime(),
+      durationMs: Math.max(0, finished - new Date(job.startedAt).getTime()),
       fragmentedPercentBefore: job.statsBefore?.totalFragmentedSpacePercent ?? null,
       fragmentedPercentAfter: job.statsAfter?.totalFragmentedSpacePercent ?? null,
       exitCode: job.exitCode ?? null
@@ -373,21 +413,9 @@ function normaliseVolumeOrFallback(input: string): string {
 
 /** Reads a sample of the defrag help output — proves the engine binary is callable. */
 export async function engineInfo(): Promise<{ available: boolean; text: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(DEFRAG, ['/?'], { windowsHide: true })
-    let text = ''
-    child.stdout.on('data', (chunk: Buffer) => {
-      text += chunk.toString('utf8')
-    })
-    child.stderr.on('data', (chunk: Buffer) => {
-      text += chunk.toString('utf8')
-    })
-    child.on('error', () => resolve({ available: false, text: '' }))
-    child.on('close', () => {
-      const available = /Defrag\s+<Volumes>/i.test(text)
-      resolve({ available, text: text.slice(0, 4000) })
-    })
-  })
+  const result = await run(systemExecutable(DEFRAG), ['/?'], 15_000)
+  const text = result.stdout || result.stderr
+  return { available: result.ok && text.trim().length > 0, text: text.slice(0, 4000) }
 }
 
 export async function ensureFileExists(file: string): Promise<boolean> {
@@ -400,12 +428,13 @@ export async function ensureFileExists(file: string): Promise<boolean> {
 }
 
 export function filesOnVolume(files: string[], volume: string): { accepted: string[]; rejected: string[] } {
-  const letter = normaliseVolume(volume).slice(0, 1).toUpperCase()
+  const drive = normaliseVolume(volume)
   const accepted: string[] = []
   const rejected: string[] = []
   for (const file of files) {
-    const drive = path.parse(file).root.slice(0, 1).toUpperCase()
-    if (drive === letter) accepted.push(file)
+    const root = path.win32.parse(file).root
+    if (path.win32.isAbsolute(file) && root.slice(0, 2).toUpperCase() === drive &&
+        !/[*?"<>|\x00-\x1f:]/.test(file.slice(root.length))) accepted.push(file)
     else rejected.push(file)
   }
   return { accepted, rejected }

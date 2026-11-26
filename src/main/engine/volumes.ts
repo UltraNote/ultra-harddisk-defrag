@@ -1,7 +1,8 @@
 import type { DiskHealth, MediaType, PhysicalDiskInfo, SmartAttribute, VolumeInfo, VolumeKind } from '../../shared/types'
-import { asArray, parseJsonLoose, powershell, run } from './shell'
+import { asArray, parseJsonLoose, powershell, run, systemExecutable } from './shell'
 
 interface RawVolume {
+  id?: string
   letter?: string
   label?: string
   fs?: string
@@ -10,6 +11,7 @@ interface RawVolume {
   free?: number
   health?: string
   diskNumber?: number | null
+  physicalDeviceId?: string
   media?: string
   bus?: string
   name?: string
@@ -33,13 +35,23 @@ interface RawDisk {
 
 const VOLUME_SCRIPT = `
 $ErrorActionPreference='SilentlyContinue'
+$disks = @(Get-Disk)
+$physical = @(Get-PhysicalDisk)
 $out = foreach ($v in Get-Volume) {
   if (-not $v.DriveLetter -and -not $v.Path) { continue }
   $p = $null
   if ($v.DriveLetter) { $p = Get-Partition -DriveLetter $v.DriveLetter | Select-Object -First 1 }
   $pd = $null
-  if ($p) { $pd = Get-PhysicalDisk | Where-Object { "$($_.DeviceId)" -eq "$($p.DiskNumber)" } | Select-Object -First 1 }
+  $d = $null
+  if ($p) {
+    $d = $disks | Where-Object Number -eq $p.DiskNumber | Select-Object -First 1
+    if ($d) {
+      $matches = @($physical | Where-Object { ($d.UniqueId -and $_.UniqueId -eq $d.UniqueId) -or ($d.SerialNumber -and $_.SerialNumber -and $_.SerialNumber.Trim() -eq $d.SerialNumber.Trim()) })
+      if ($matches.Count -eq 1) { $pd = $matches[0] }
+    }
+  }
   [pscustomobject]@{
+    id = [string]$v.Path
     letter = if ($v.DriveLetter) { [string]$v.DriveLetter } else { $null }
     label = [string]$v.FileSystemLabel
     fs = [string]$v.FileSystemType
@@ -48,9 +60,10 @@ $out = foreach ($v in Get-Volume) {
     free = if ($v.SizeRemaining) { [int64]$v.SizeRemaining } else { 0 }
     health = [string]$v.HealthStatus
     diskNumber = if ($p) { [int]$p.DiskNumber } else { $null }
+    physicalDeviceId = if ($pd) { [string]$pd.DeviceId } else { $null }
     media = if ($pd) { [string]$pd.MediaType } else { $null }
-    bus = if ($pd) { [string]$pd.BusType } else { $null }
-    name = if ($pd) { [string]$pd.FriendlyName } else { $null }
+    bus = if ($pd) { [string]$pd.BusType } elseif ($d) { [string]$d.BusType } else { $null }
+    name = if ($pd) { [string]$pd.FriendlyName } elseif ($d) { [string]$d.FriendlyName } else { $null }
   }
 }
 ConvertTo-Json -InputObject @($out) -Compress -Depth 4
@@ -162,7 +175,7 @@ export async function listVolumes(): Promise<VolumeInfo[]> {
     .map<VolumeInfo>((row) => {
       const letter = row.letter ? row.letter.toUpperCase() : null
       return {
-        id: letter ?? row.label ?? 'volume',
+        id: row.id || letter || row.label || 'volume',
         letter,
         label: row.label ?? '',
         fileSystem: row.fs ?? '',
@@ -171,6 +184,7 @@ export async function listVolumes(): Promise<VolumeInfo[]> {
         freeBytes: Number(row.free ?? 0),
         health: row.health ?? 'Unknown',
         diskNumber: row.diskNumber ?? null,
+        physicalDeviceId: row.physicalDeviceId ?? undefined,
         mediaType: normaliseMedia(row.media),
         busType: row.bus ?? '',
         physicalName: row.name ?? '',
@@ -189,7 +203,7 @@ export async function listPhysicalDisks(volumes: VolumeInfo[]): Promise<Physical
   const rows = asArray<RawDisk>(raw)
   return rows.map((row) => {
     const deviceId = String(row.id ?? '')
-    const attached = volumes.filter((v) => String(v.diskNumber ?? '') === deviceId && v.letter).map((v) => v.letter as string)
+    const attached = volumes.filter((v) => v.physicalDeviceId === deviceId && v.letter).map((v) => v.letter as string)
     const notes: string[] = []
     if (!attached.length) notes.push('no mounted volume letter')
     return {
@@ -215,7 +229,7 @@ export async function listPhysicalDisks(volumes: VolumeInfo[]): Promise<Physical
 
 /** fsutil works unelevated and tells us whether TRIM is allowed for NTFS/ReFS. */
 export async function trimState(): Promise<{ enabled: boolean | null; value: number | null; raw: string }> {
-  const result = await run('fsutil', ['behavior', 'query', 'DisableDeleteNotify'], 15_000)
+  const result = await run(systemExecutable('fsutil.exe'), ['behavior', 'query', 'DisableDeleteNotify'], 15_000)
   const text = `${result.stdout}${result.stderr}`
   const match = text.match(/NTFS\s+DisableDeleteNotify\s*=\s*(\d)/i)
   const value = match ? Number(match[1]) : null

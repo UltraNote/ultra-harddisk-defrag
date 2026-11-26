@@ -60,14 +60,14 @@ export default function App(): React.JSX.Element {
   }, [settings.notifications.displaySeconds])
 
   const refreshStatus = React.useCallback(async () => {
-    setStatus(await api.getStatus())
+    const [nextStatus, nextSettings] = await Promise.all([api.getStatus(), api.getSettings()])
+    setStatus(nextStatus)
+    setSettings(nextSettings)
   }, [])
 
   React.useEffect(() => {
     void (async () => {
-      const [nextSettings, currentJob] = await Promise.all([api.getSettings(), api.getJob()])
-      setSettings(nextSettings)
-      setJob(currentJob)
+      setJob(await api.getJob())
       await refreshStatus()
     })()
   }, [refreshStatus])
@@ -98,28 +98,45 @@ export default function App(): React.JSX.Element {
 
   const saveSettings = React.useCallback(
     async (patch: DeepPartial<Settings>) => {
-      const next = await api.saveSettings(patch)
-      setSettings(next)
-      await refreshStatus()
-    },
-    [refreshStatus]
-  )
-
-  const runJob = React.useCallback(
-    async (request: DefragRequest): Promise<DefragJob> => {
-      setPage('defrag')
-      const result = await api.startJob(request)
-      setJob(result)
-      if (result.state === 'needs-elevation') {
-        pushToast({ title: 'Administrator required', body: result.elevationHint ?? 'Relaunch elevated to run the Windows optimizer.', level: 'warn' })
-      } else if (result.state === 'failed') {
-        pushToast({ title: 'Operation failed', body: result.error ?? 'See the Defrag log.', level: 'error' })
+      try {
+        setSettings(await api.saveSettings(patch))
+        await refreshStatus()
+      } catch (error) {
+        pushToast({ title: 'Could not save settings', body: String(error), level: 'error' })
       }
-      await refreshStatus()
-      return result
     },
     [pushToast, refreshStatus]
   )
+
+  const resetSettings = React.useCallback(async () => {
+    try {
+      setSettings(await api.resetSettings())
+      await refreshStatus()
+      pushToast({ title: 'Settings restored', body: 'Default settings are active.', level: 'success' })
+    } catch (error) {
+      pushToast({ title: 'Could not reset settings', body: String(error), level: 'error' })
+    }
+  }, [pushToast, refreshStatus])
+
+  const runJobs = React.useCallback(
+    async (requests: DefragRequest[]): Promise<void> => {
+      setPage('defrag')
+      try {
+        const results = await api.startJobs(requests)
+        const result = results.find((job) => job.state === 'failed' || job.state === 'needs-elevation')
+        if (result?.state === 'needs-elevation') {
+          pushToast({ title: 'Administrator required', body: result.elevationHint ?? 'Relaunch as Administrator to run the Windows optimizer.', level: 'warn' })
+        } else if (result) {
+          pushToast({ title: 'Operation failed', body: result.error ?? 'See the Defrag log.', level: 'error' })
+        }
+        await refreshStatus()
+      } catch (error) {
+        pushToast({ title: 'Could not start disk operation', body: String(error), level: 'error' })
+      }
+    },
+    [pushToast, refreshStatus]
+  )
+  const runJob = React.useCallback((request: DefragRequest) => runJobs([request]), [runJobs])
 
   const cancelJob = React.useCallback(async () => {
     await api.cancelJob()
@@ -142,9 +159,11 @@ export default function App(): React.JSX.Element {
     busy: job?.state === 'running',
     refreshStatus,
     saveSettings,
+    resetSettings,
     navigate: setPage,
     pushToast,
     runJob,
+    runJobs,
     cancelJob,
     elevate
   }
@@ -222,6 +241,13 @@ export default function App(): React.JSX.Element {
           </nav>
 
           <main className="main">
+            {status?.pendingPowerAction ? (
+              <div className="banner" role="status">
+                <AlertTriangle size={18} />
+                <span className="grow">PC will {status.pendingPowerAction.action} at {new Date(status.pendingPowerAction.dueAt).toLocaleTimeString()}.</span>
+                <button className="btn sm" onClick={() => void api.cancelPowerAction()}>Cancel power action</button>
+              </div>
+            ) : null}
             {page === 'dashboard' ? <DashboardPage /> : null}
             {page === 'defrag' ? <DefragPage /> : null}
             {page === 'largefiles' ? <LargeFilesPage /> : null}

@@ -1,5 +1,5 @@
 import React from 'react'
-import { FileSearch, FolderOpen, HardDriveDownload, Loader2, Play, ScanLine } from 'lucide-react'
+import { FileSearch, FolderOpen, Loader2, Play, ScanLine } from 'lucide-react'
 import type { LargeFileEntry } from '@shared/types'
 import { api } from '../api'
 import { useApp } from '../lib/context'
@@ -9,7 +9,7 @@ import { EmptyState, Pill } from '../components/ui'
 const SIZES = [100, 500, 1024, 5120]
 
 export default function LargeFilesPage(): React.JSX.Element {
-  const { status, runJob, pushToast, settings } = useApp()
+  const { status, runJob, pushToast, busy } = useApp()
   const volumes = (status?.volumes ?? []).filter((v) => v.letter && v.kind !== 'cdrom')
   const [volume, setVolume] = React.useState(volumes[0]?.letter ?? 'C:')
   const [minSize, setMinSize] = React.useState(1024)
@@ -50,6 +50,10 @@ export default function LargeFilesPage(): React.JSX.Element {
   }
 
   const selectedSize = files.filter((f) => selected.has(f.path)).reduce((sum, f) => sum + f.sizeBytes, 0)
+  const selectedFiles = files.filter((file) => selected.has(file.path))
+  const targetVolume = selectedFiles[0]?.volumeLetter
+  const canDefrag = targetVolume && selectedFiles.every((file) => file.volumeLetter === targetVolume) &&
+    volumes.some((entry) => entry.letter === targetVolume && entry.mediaType === 'HDD')
 
   return (
     <div className="fade-in">
@@ -127,12 +131,12 @@ export default function LargeFilesPage(): React.JSX.Element {
             </button>
             <button
               className="btn sm primary"
-              disabled={selected.size === 0 || !status?.elevated}
-              title={status?.elevated ? 'Defragment just these files' : 'Needs Administrator'}
+              disabled={!canDefrag || !status?.elevated || busy || loading}
+              title="Requires Administrator rights and selected files on a single detected HDD"
               onClick={async () => {
                 const target = [...selected]
-                if (target.length === 0) return
-                await runJob({ action: 'files', volume, files: target })
+                if (!targetVolume || target.length === 0) return
+                await runJob({ action: 'files', volume: targetVolume, files: target })
               }}
             >
               <Play size={13} /> Defrag selected
@@ -186,12 +190,7 @@ export default function LargeFilesPage(): React.JSX.Element {
         )}
       </div>
 
-      <div className="row dim small" style={{ marginTop: 12, gap: 8 }}>
-        <HardDriveDownload size={14} />
-        {settings.defrag.skipFilesOver1Gb
-          ? 'Setting "skip files over 1 GB" is on — the automatic runs never touch these files, only this page does.'
-          : 'Files over 1 GB are included in automatic runs when the setting says so; here they are always allowed.'}
-      </div>
+
     </div>
   )
 }

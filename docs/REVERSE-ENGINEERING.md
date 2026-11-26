@@ -115,7 +115,7 @@ npx asar list "release/win-unpacked/resources/app.asar"
 | Volume grid with fragmentation % | Dashboard volume cards | `defrag /A` parsed into `FragmentationStats` |
 | Analyze / Defrag / Fast Defrag | Tiles → `/A`, `/O`, `/O` without `/V` | Same documented switches |
 | Large-file defrag | Large Files page + `/File` | Our own bounded scanner chooses targets |
-| Boot-time defrag | Boot optimization card + `/B` | Windows performs the work at next restart |
+| Boot-time defrag | Boot optimization card + `/B` | Windows performs boot-file optimization when requested |
 | SSD TRIM optimize | Trim & Intelligent Optimize → `/L` | Media type comes from `Get-PhysicalDisk` |
 | SMART / health window | Disk Health page | TRIM via `fsutil`, disks via CIM, SMART only when exposed |
 | Auto defrag while idle | Auto Defrag (idle gate) | `powerMonitor` idle time + threshold |

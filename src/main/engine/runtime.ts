@@ -4,42 +4,26 @@ import path from 'node:path'
 
 export interface RuntimePaths {
   root: string
-  vault: string
-  safeBox: string
   state: string
-  logs: string
-  quarantineIndex: string
-  safeBoxIndex: string
   settings: string
   history: string
-  detections: string
-  whiteListBackup: string
 }
 
 /**
- * All engine persistence lives under one root (Electron: %APPDATA%/Ultra Malware Fighter).
+ * Electron stores engine state under its user data directory.
  * Pure Node so the engine and the self-test never need Electron.
  */
 export function createPaths(root: string): RuntimePaths {
   return {
     root,
-    vault: path.join(root, 'vault'),
-    safeBox: path.join(root, 'safebox'),
     state: path.join(root, 'state'),
-    logs: path.join(root, 'logs'),
-    quarantineIndex: path.join(root, 'state', 'quarantine.json'),
-    safeBoxIndex: path.join(root, 'state', 'safebox.json'),
     settings: path.join(root, 'state', 'settings.json'),
-    history: path.join(root, 'state', 'history.json'),
-    detections: path.join(root, 'state', 'detections.json'),
-    whiteListBackup: path.join(root, 'state', 'whitelist.backup.json')
+    history: path.join(root, 'state', 'history.json')
   }
 }
 
 export async function ensureDirs(p: RuntimePaths): Promise<void> {
-  for (const dir of [p.root, p.vault, p.safeBox, p.state, p.logs]) {
-    await fs.mkdir(dir, { recursive: true })
-  }
+  await fs.mkdir(p.state, { recursive: true })
 }
 
 export async function readJson<T>(file: string, fallback: T): Promise<T> {

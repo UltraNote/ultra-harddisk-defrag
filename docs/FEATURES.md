@@ -46,7 +46,7 @@ the UI before execution. No undocumented flags are invented.
 | `freeSpace` | `defrag.exe <vol> /X /U /V` | Free-space consolidation. |
 | `retrim` | `defrag.exe <vol> /L /U` | TRIM/retrim, SSD. |
 | `slab` | `defrag.exe <vol> /K /U` | Slab consolidation. |
-| `bootOptimize` | `defrag.exe <vol> /B` | Boot files at next restart. |
+| `bootOptimize` | `defrag.exe <vol> /B` | Run Windows boot-file optimization on a detected HDD. |
 | `files` | `defrag.exe <vol> /D /U /File <path…>` | Targeted defrag, volume-checked. |
 
 Volume identifiers accept `C`, `C:`, `C:\` and `\\?\Volume{guid}\`; anything else is
@@ -119,7 +119,7 @@ The raw report tail (20 kB) is kept on the stats object for troubleshooting.
 ### 4.7 Automation
 * Auto Defrag: idle gate → analyze → optimize only above threshold → 6 h cool-down.
 * Scheduled: daily/weekly/monthly, one run per day, battery guard, silent-mode gate,
-  optional shutdown with countdown and cancel.
+  optional shutdown with countdown and cancel. The app remembers the latest run across restarts.
 * Boot optimization: settings toggles + on-demand `/B` execution.
 * Exclusion list honoured by both automatic paths; manual runs unaffected.
 
@@ -145,8 +145,8 @@ amber spindle, on a graphite tile with a rim light so it stays visible on a dark
 * `build/icon-preview.png` shows every size side by side for review.
 * Deliberately unlike **Ultra Malware Fighter's** blue shield — the two apps must never be confused in
   the taskbar, tray or installer list.
-* The icon reaches the exe through `afterPack` → `scripts/patch-exe.mjs` (rcedit), and the window/tray
-  through `build/icon.png`, which `electron-builder.yml` copies to `resources/icon.png`
+- Electron Builder applies the executable icon. The window and tray use `build/icon.png`, which
+  `electron-builder.yml` copies to `resources/icon.png`
   (`nativeIcon()` reads `process.resourcesPath` when packaged).
 
 ### 4.11 UI surface

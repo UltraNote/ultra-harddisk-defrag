@@ -99,13 +99,14 @@ function VolumeRow({ volume }: { volume: VolumeInfo }): React.JSX.Element {
 }
 
 export default function DashboardPage(): React.JSX.Element {
-  const { status, settings, elevate, navigate, runJob } = useApp()
+  const { status, settings, elevate, navigate, runJobs } = useApp()
   const volumes = status?.volumes ?? []
+  const targets = volumes.filter((volume) => volume.letter && volume.kind === 'fixed')
   const analyzed = volumes.filter((v) => v.fragmentation)
   const averageFrag = analyzed.length
     ? Math.round(analyzed.reduce((sum, v) => sum + (v.fragmentation?.totalFragmentedSpacePercent ?? 0), 0) / analyzed.length)
     : null
-  const unhealthy = (status?.health?.physicalDisks ?? []).filter((d) => d.health && !/healthy/i.test(d.health))
+  const unhealthy = (status?.health?.physicalDisks ?? []).filter((d) => /^(warning|unhealthy)$/i.test(d.health.trim()))
   const fragmentedVolumes = analyzed.filter((v) => (v.fragmentation?.totalFragmentedSpacePercent ?? 0) >= settings.autoDefrag.thresholdPercent)
 
   return (
@@ -119,15 +120,8 @@ export default function DashboardPage(): React.JSX.Element {
           <button className="btn" onClick={() => navigate('health')}>Disk health</button>
           <button
             className="btn primary"
-            disabled={!volumes.some((v) => v.letter) || status?.lastJob?.state === 'running'}
-            onClick={() => {
-              const targets = volumes.filter((v) => v.letter && v.kind === 'fixed')
-              void (async () => {
-                for (const volume of targets) {
-                  await runJob({ action: volume.mediaType === 'SSD' ? 'retrim' : 'optimize', volume: volume.letter! })
-                }
-              })()
-            }}
+            disabled={!targets.length || status?.lastJob?.state === 'running'}
+            onClick={() => void runJobs(targets.map((volume) => ({ action: 'optimize', volume: volume.letter! })))}
           >
             <Sparkles size={15} /> Optimize all
           </button>
@@ -165,7 +159,7 @@ export default function DashboardPage(): React.JSX.Element {
           {volumes.length === 0 ? (
             <div className="empty">No volumes reported by Windows yet.</div>
           ) : (
-            volumes.filter((v) => !settings.general.hideRemovable || v.kind === 'fixed').map((volume) => <VolumeRow key={volume.id} volume={volume} />)
+            volumes.map((volume) => <VolumeRow key={volume.id} volume={volume} />)
           )}
         </div>
       </div>
@@ -201,15 +195,7 @@ export default function DashboardPage(): React.JSX.Element {
                 </div>
               </div>
             </div>
-            <div className="row" style={{ gap: 10 }}>
-              <Dot color={settings.bootOptimize.enabled ? 'amber' : 'dim'} />
-              <div className="grow">
-                <div style={{ fontWeight: 550 }}>Boot time optimization</div>
-                <div className="dim small">
-                  {settings.bootOptimize.enabled ? `Asks Windows to optimize boot files (${settings.bootOptimize.cadence}).` : 'Off — boot files are left alone.'}
-                </div>
-              </div>
-            </div>
+
           </div>
         </div>
 

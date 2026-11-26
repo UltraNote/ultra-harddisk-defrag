@@ -29,6 +29,7 @@ export interface VolumeInfo {
   freeBytes: number
   health: string
   diskNumber: number | null
+  physicalDeviceId?: string
   mediaType: MediaType
   busType: string
   physicalName: string
@@ -86,6 +87,10 @@ export type DefragAction =
   | 'bootOptimize'
   | 'files'
 
+export function requiresHdd(action: DefragAction): boolean {
+  return action === 'traditional' || action === 'freeSpace' || action === 'bootOptimize' || action === 'files'
+}
+
 export interface DefragRequest {
   action: DefragAction
   volume: string
@@ -106,6 +111,7 @@ export interface DefragJob {
   action: DefragAction
   volume: string
   state: JobState
+  dryRun?: boolean
   command: string
   percent: number
   phase: string
@@ -128,6 +134,7 @@ export interface OptimizeHistoryEntry {
   finishedAt: string
   state: JobState
   durationMs: number
+  dryRun?: boolean
   fragmentedPercentBefore: number | null
   fragmentedPercentAfter: number | null
   exitCode: number | null
@@ -173,7 +180,7 @@ export interface AppStatus {
   lastOptimize: OptimizeHistoryEntry | null
   onBattery: boolean
   scheduledNext: string | null
-  bootPending: boolean
+  pendingPowerAction: { action: Exclude<Settings['afterTask']['action'], 'none'>; dueAt: number } | null
   issues: ActionCenterIssue[]
   stats: {
     optimizations: number
@@ -270,7 +277,9 @@ export interface UltraApi {
 
   analyze(volume: string, dryRun?: boolean): Promise<DefragJob>
   startJob(request: DefragRequest): Promise<DefragJob>
+  startJobs(requests: DefragRequest[]): Promise<DefragJob[]>
   cancelJob(): Promise<void>
+  cancelPowerAction(): Promise<boolean>
   getJob(): Promise<DefragJob | null>
   getHistory(): Promise<OptimizeHistoryEntry[]>
   previewCommand(request: DefragRequest): Promise<DefragCommand>

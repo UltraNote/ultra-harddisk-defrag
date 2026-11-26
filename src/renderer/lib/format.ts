@@ -60,7 +60,7 @@ export const ACTION_HINTS: Record<DefragAction, string> = {
   freeSpace: 'Consolidates free space so new files are written contiguously.',
   retrim: 'Sends TRIM to an SSD and releases free blocks. Never defragments an SSD.',
   slab: 'Slab consolidation for thinly provisioned volumes.',
-  bootOptimize: 'Asks Windows to optimize boot files at the next restart.',
+  bootOptimize: 'Runs Windows boot-file optimization on an HDD.',
   files: 'Defragments only the selected files (/File), on their own volume.'
 }
 

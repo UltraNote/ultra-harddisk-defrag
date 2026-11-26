@@ -40,19 +40,19 @@ const check = (name, ok, detail = '') => {
   }
 }
 
-/** Electron stores the Run value under the app id, so accept either name. */
+const runPath = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+const appId = 'work.selman.ultra-harddisk-defrag'
 function runKey() {
-  for (const name of ['work.selman.ultra-harddisk-defrag', 'Ultra Harddisk Defrag', 'Ultra Harddisk Defrag.exe']) {
-    try {
-      return execFileSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', name], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore']
-      })
-    } catch {
-      /* try the next name */
-    }
+  try {
+    const output = execFileSync('reg', ['query', runPath, '/v', appId], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+    })
+    const match = output.match(/^\s*work\.selman\.ultra-harddisk-defrag\s+(REG_\w+)\s+(.*)$/m)
+    if (match) return { type: match[1], value: match[2].trimEnd() }
+  } catch {
+    // The Run entry is absent.
   }
-  return ''
+  return null
 }
 
 await sleep(500)
@@ -60,7 +60,7 @@ const shotDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ultra-defrag-window-'))
 
 const sizeBefore = await evaluate('({ w: window.outerWidth, h: window.outerHeight })')
 const workArea = await evaluate('({ w: screen.availWidth, h: screen.availHeight })')
-const before = await shot(path.join(shotDir, 'before.png'))
+await shot(path.join(shotDir, 'before.png'))
 await evaluate('window.ultra.windowMaximize()')
 await sleep(1300)
 const sizeAfter = await evaluate('({ w: window.outerWidth, h: window.outerHeight })')
@@ -79,22 +79,33 @@ check('maximizing again restores the window', restored.h <= sizeBefore.h + 4, `$
 const titleText = await evaluate('document.querySelector(".titlebar .brand")?.innerText ?? ""')
 check('title bar shows the product name', /Ultra Harddisk Defrag/.test(titleText), titleText.replace(/\s+/g, ' '))
 
-// autostart: enable, prove the registry value exists, disable, prove it is gone
-await evaluate('window.ultra.saveSettings({ general: { autoStart: true } })')
-await sleep(800)
-const enabledKey = runKey()
-check('autostart writes the HKCU Run value', /Ultra Harddisk Defrag/.test(enabledKey),
-  enabledKey.split(/\r?\n/).find((line) => /REG_SZ/.test(line))?.trim() ?? 'missing')
+const initialKey = runKey()
+const initialSetting = (await evaluate('window.ultra.getSettings()')).general.autoStart
+try {
+  const on = await evaluate('window.ultra.saveSettings({ general: { autoStart: true } })')
+  const enabledKey = runKey()
+  check('autostart enables the setting', on.general.autoStart === true)
+  check('autostart writes the app launch command to HKCU Run', /electron\.exe|Ultra Harddisk Defrag\.exe/i.test(enabledKey?.value ?? ''), enabledKey?.value ?? 'missing')
 
-await evaluate('window.ultra.saveSettings({ general: { autoStart: false } })')
-await sleep(800)
-const disabledKey = runKey()
-check('autostart removes the HKCU Run value', !/Ultra Harddisk Defrag/.test(disabledKey), disabledKey ? 'still present' : 'removed')
-
-const settings = await evaluate('window.ultra.getSettings()')
-check('autostart setting reads back as false', settings.general.autoStart === false)
+  await evaluate('window.ultra.saveSettings({ general: { autoStart: false } })')
+  check('turning autostart off removes the HKCU Run value', runKey() === null)
+  await evaluate('window.ultra.saveSettings({ general: { autoStart: true } })')
+  const values = await evaluate('window.ultra.resetSettings()')
+  check('reset restores the default autostart setting', values.general.autoStart === false)
+  check('reset removes the HKCU Run value', runKey() === null)
+} finally {
+  try {
+    await evaluate(`window.ultra.saveSettings({ general: { autoStart: ${initialSetting} } })`)
+  } finally {
+    if (initialKey) {
+      execFileSync('reg', ['add', runPath, '/v', appId, '/t', initialKey.type, '/d', initialKey.value, '/f'], { stdio: 'ignore' })
+    } else if (runKey()) {
+      execFileSync('reg', ['delete', runPath, '/v', appId, '/f'], { stdio: 'ignore' })
+    }
+  }
+}
 
 console.log(`\n${passed} passed, ${failed} failed`)
 console.log(`screenshots: ${shotDir}`)
 ws.close()
-process.exit(failed === 0 ? 0 : 1)
+process.exitCode = failed === 0 ? 0 : 1

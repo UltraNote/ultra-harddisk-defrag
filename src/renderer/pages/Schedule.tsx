@@ -30,7 +30,8 @@ function SettingRow({
 }
 
 export default function SchedulePage(): React.JSX.Element {
-  const { settings, saveSettings, status, runJob, pushToast } = useApp()
+  const { settings, saveSettings, status, runJob, pushToast, busy } = useApp()
+  const systemVolume = status?.volumes.find((volume) => volume.isSystem)
   const [program, setProgram] = React.useState('')
 
   return (
@@ -39,7 +40,7 @@ export default function SchedulePage(): React.JSX.Element {
         <div>
           <h1>Schedule &amp; automation</h1>
           <p>
-            Automatic work only runs when the machine is idle, on AC power (unless you turn the guard off) and no full-screen game is running. Everything here maps to a plain <code className="mono">defrag.exe</code> run — there is no background service.
+            Idle optimization and scheduled runs require an Administrator session. The battery guard and silent-mode program list apply to both.
           </p>
         </div>
         <div className="actions">
@@ -55,7 +56,7 @@ export default function SchedulePage(): React.JSX.Element {
         <SettingRow label="Enabled" desc="Requires Administrator rights; disabled automatically when running unelevated.">
           <Toggle on={settings.autoDefrag.enabled} onChange={(next) => void saveSettings({ autoDefrag: { enabled: next } })} />
         </SettingRow>
-        <SettingRow label="Fragmentation threshold" desc="Volumes at or below this level are left alone.">
+        <SettingRow label="Fragmentation threshold" desc="Volumes below this level are left alone.">
           <input
             className="input"
             style={{ width: 90 }}
@@ -99,7 +100,7 @@ export default function SchedulePage(): React.JSX.Element {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-head">
           <h3><CalendarClock size={14} style={{ verticalAlign: '-2px', marginRight: 6 }} />Scheduled defrag</h3>
-          <span className="sub">Checked every minute while the app is running</span>
+          <span className="sub">Checked every 30 seconds while the app is running</span>
         </div>
         <SettingRow label="Enabled">
           <Toggle on={settings.scheduled.enabled} onChange={(next) => void saveSettings({ scheduled: { enabled: next } })} />
@@ -186,44 +187,16 @@ export default function SchedulePage(): React.JSX.Element {
           <div className="card-head">
             <h3><Power size={14} style={{ verticalAlign: '-2px', marginRight: 6 }} />Boot time optimization</h3>
           </div>
-          <SettingRow label="Enabled" desc="Windows optimizes the files it can only touch before the boot sequence finishes.">
-            <Toggle on={settings.bootOptimize.enabled} onChange={(next) => void saveSettings({ bootOptimize: { enabled: next } })} />
-          </SettingRow>
-          <SettingRow label="Cadence">
-            <select
-              className="input"
-              style={{ width: 180 }}
-              value={settings.bootOptimize.cadence}
-              onChange={(e) => void saveSettings({ bootOptimize: { cadence: e.target.value as typeof settings.bootOptimize.cadence } })}
-            >
-              <option value="firstBootOfDay">First boot of the day</option>
-              <option value="everyBoot">Every boot</option>
-              <option value="everyTwoDays">Every two days</option>
-              <option value="nextBoot">Next boot only</option>
-            </select>
-          </SettingRow>
-          {[
-            ['pagefile', 'Pagefile'],
-            ['mft', 'Master File Table'],
-            ['systemFiles', 'System files'],
-            ['registryFiles', 'Registry hives']
-          ].map(([key, label]) => (
-            <SettingRow key={key} label={label}>
-              <Toggle
-                on={settings.bootOptimize[key as 'pagefile' | 'mft' | 'systemFiles' | 'registryFiles']}
-                onChange={(next) => void saveSettings({ bootOptimize: { [key]: next } as Record<string, boolean> })}
-              />
-            </SettingRow>
-          ))}
           <div style={{ padding: 16 }}>
             <button
               className="btn"
-              onClick={() => void runJob({ action: 'bootOptimize', volume: status?.volumes.find((v) => v.isSystem)?.letter ?? 'C:' })}
+              disabled={busy || systemVolume?.mediaType !== 'HDD' || !systemVolume.letter}
+              onClick={() => systemVolume?.letter && void runJob({ action: 'bootOptimize', volume: systemVolume.letter })}
             >
-              <Play size={14} /> Ask Windows to optimize at next restart
+              <Play size={14} /> Run boot-file optimization
             </button>
             <div className="dim small" style={{ marginTop: 8 }}>
-              This runs <code className="mono">defrag.exe C: /B</code>. The work happens on the next start, not now.
+              Windows runs <code className="mono">defrag.exe /B</code> on a detected system HDD.
             </div>
           </div>
         </div>

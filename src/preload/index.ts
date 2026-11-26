@@ -32,7 +32,9 @@ const api: UltraApi = {
 
   analyze: (volume: string, dryRun?: boolean) => invoke<DefragJob>('ultra:analyze', volume, dryRun),
   startJob: (request: DefragRequest) => invoke<DefragJob>('ultra:job:start', request),
+  startJobs: (requests: DefragRequest[]) => invoke<DefragJob[]>('ultra:jobs:start', requests),
   cancelJob: () => invoke<void>('ultra:job:cancel'),
+  cancelPowerAction: () => invoke<boolean>('ultra:power:cancel'),
   getJob: () => invoke<DefragJob | null>('ultra:job:current'),
   getHistory: () => invoke<OptimizeHistoryEntry[]>('ultra:history'),
   previewCommand: (request: DefragRequest) => invoke<DefragCommand>('ultra:job:preview', request),

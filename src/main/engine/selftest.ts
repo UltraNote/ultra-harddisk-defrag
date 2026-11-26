@@ -122,6 +122,16 @@ async function main(): Promise<void> {
       return true
     }
   })())
+  check('SSD optimization selects retrim', buildCommand({ action: 'optimize', volume: 'C:' }, 'SSD').args.join(' ') === 'C: /L /U')
+  check('unknown media delegates to Windows', buildCommand({ action: 'optimize', volume: 'C:' }, 'Unknown').args.includes('/O'))
+  check('explicit data-moving operations require a detected HDD', (['traditional', 'freeSpace', 'bootOptimize', 'files'] as const).every((action) => {
+    try {
+      buildCommand({ action, volume: 'C:', files: ['C:\\file.bin'] }, 'SSD')
+      return false
+    } catch (error) {
+      return error instanceof Error && error.message.includes('HDD')
+    }
+  }))
 
   // ---- output parsing ----------------------------------------------------
   const parsed = parseDefragOutput(SAMPLE_ANALYSIS)
@@ -129,6 +139,9 @@ async function main(): Promise<void> {
     `${parsed.stats?.totalFragmentedSpacePercent}% / ${parsed.stats?.fragmentedFiles} files / ${parsed.stats?.excessFragments} excess`)
   check('free space percentage parses', parsed.stats?.freeSpacePercent === 33)
   check('analysis completion is detected', parsed.done === true)
+  check('optimization stats use the post-operation report', parseDefragOutput(
+    'Pre-Optimization Report:\r\nTotal fragmented space = 9%\r\nPost-Optimization Report:\r\nTotal fragmented space = 2%'
+  ).stats?.totalFragmentedSpacePercent === 2)
 
   const progress = parseDefragOutput(SAMPLE_PROGRESS)
   check('progress percentage is the highest value seen', progress.percent === 99, `${progress.percent}%`)
@@ -139,6 +152,8 @@ async function main(): Promise<void> {
 
   const crossVolume = filesOnVolume(['C:\\a.bin', 'D:\\b.bin'], 'C:')
   check('targeted files are filtered by volume', crossVolume.accepted.length === 1 && crossVolume.rejected.length === 1)
+  check('targeted file selection rejects wildcard, relative and alternate-stream paths',
+    filesOnVolume(['C:\\*.bin', 'C:relative.bin', 'C:\\file.bin:stream', '/FileList'], 'C:').accepted.length === 0)
 
   // ---- live volume / health probing -------------------------------------
   const volumes = await listVolumes()
@@ -170,6 +185,7 @@ async function main(): Promise<void> {
   const bigScan = await scanLargeFiles({ root: bigDir, minSizeMb: 32, limit: 10, budgetMs: 20_000 })
   const foundBig = bigScan.files.some((f) => f.path.toLowerCase() === bigPath.toLowerCase())
   check('large-file scan finds a file above the threshold', foundBig, `${bigScan.files.length} candidate(s), scanned ${bigScan.scannedFiles}`)
+  check('large-file scan reports an expired budget', (await scanLargeFiles({ root: bigDir, minSizeMb: 1, limit: 10, budgetMs: 0 })).truncated)
 
   // ---- runner: dry run and elevation gate --------------------------------
   const jobs: DefragJob[] = []
@@ -216,9 +232,26 @@ async function main(): Promise<void> {
     exitCode: 0
   })
   check('history and counters update', store.historyEntries().length === 1 && store.stats().optimizations === 1)
+  const successful = store.historyEntries()[0]
+  await store.addHistory({ ...successful, id: 'h2', dryRun: true, exitCode: null })
+  await store.addHistory({ ...successful, id: 'h3', action: 'analyze', state: 'failed' })
+  await store.addHistory({ ...successful, id: 'h4', action: 'analyze' })
+  check('only completed real operations count in their respective categories', store.stats().optimizations === 1 && store.stats().analyzedVolumes === 1)
 
   store.recordVolume('C:', 'optimize', 1)
   check('per-volume memory is recorded', store.volumeState().C?.lastAction === 'optimize')
+  const firstSave = store.updateSettings({ autoDefrag: { thresholdPercent: 15 } })
+  const secondSave = store.updateSettings({ scheduled: { hour: 7 } })
+  await Promise.all([firstSave, secondSave])
+  store.addLog('app', 'info', 'Clear this log entry')
+  await store.clearLogs()
+  store.markAutomationRun({ scheduledDay: '2026-11-26', autoAt: 123456789 })
+  await store.flush()
+  const reopened = new Store(paths)
+  await reopened.init()
+  check('rapid settings saves preserve both changes on disk', reopened.settings().scheduled.hour === 7 && reopened.settings().autoDefrag.thresholdPercent === 15)
+  check('log clearing cannot be overwritten by an earlier log write', reopened.getLogs().length === 0)
+  check('automation run tracking survives restarts', reopened.automationState().scheduledDay === '2026-11-26' && reopened.automationState().autoAt === 123456789)
 
   console.log(lines.join('\n'))
   console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped`)

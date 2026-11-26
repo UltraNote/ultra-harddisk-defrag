@@ -128,7 +128,7 @@ export default function HealthPage(): React.JSX.Element {
                     <td className="dim">{disk.busType}</td>
                     <td className="num mono">{formatBytes(disk.sizeBytes)}</td>
                     <td>
-                      <Pill tone={/healthy/i.test(disk.health) ? 'green' : 'rose'}>{disk.health || 'unknown'}</Pill>
+                      <Pill tone={/^healthy$/i.test(disk.health) ? 'green' : /^(warning|unhealthy)$/i.test(disk.health) ? 'rose' : 'muted'}>{disk.health || 'unknown'}</Pill>
                     </td>
                     <td className="num mono">{disk.temperatureC !== null ? `${disk.temperatureC} °C` : '—'}</td>
                     <td className="num mono">{disk.wear !== null ? `${disk.wear}%` : '—'}</td>

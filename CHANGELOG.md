@@ -3,6 +3,20 @@
 All notable changes to Ultra Harddisk Defrag. Format follows Keep a Changelog; versions are
 earned by passing the gates in `docs/ROADMAP.md`.
 
+## Unreleased
+
+* Apply media-aware commands across manual, batch, and scheduled runs. Optimize uses TRIM
+  on detected SSDs. Traditional defrag and targeted files require a detected HDD.
+* Keep dry runs out of optimization totals, volume state, and after-task power actions.
+  Persist settings and history in order and remember automation runs across restarts.
+* Run multi-volume jobs as cancellable batches. Cancel a pending power action from the
+  app, tray, or Windows notification.
+* Correct the boot-file optimization UI to describe the Windows command it runs.
+  Remove controls for unsupported boot-time and large-file preferences.
+* Restore Windows autostart correctly when settings are reset. Update Electron and
+  the build tools and verify the installer and portable packaging paths.
+* Add isolated desktop verification for development, packaged, and installed builds.
+
 ## [1.0.0] — 2026-11-17
 
 ### Packaging — installer and identity

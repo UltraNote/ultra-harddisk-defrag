@@ -1,7 +1,9 @@
 import {
   DEFAULT_SETTINGS,
+  requiresHdd,
   type ActionCenterIssue,
   type AppStatus,
+  type DefragCommand,
   type DefragJob,
   type DefragRequest,
   type DiskHealth,
@@ -222,7 +224,7 @@ function buildMock(): UltraApi {
     lastOptimize: history[0] ?? null,
     onBattery: false,
     scheduledNext: settings.scheduled.enabled ? new Date(Date.now() + 6 * 3600_000).toISOString() : null,
-    bootPending: settings.bootOptimize.enabled,
+    pendingPowerAction: null,
     issues: mockIssues(),
     stats: { optimizations: 2, analyzedVolumes: 3, bytesOptimized: 0, lastRunAt: new Date(Date.now() - 5 * 3600_000).toISOString(), installedAt: nowIso() }
   })
@@ -231,13 +233,27 @@ function buildMock(): UltraApi {
     for (const listener of statusListeners) listener(status())
   }
 
+  const previewCommand = (request: DefragRequest): DefragCommand => {
+    const volume = `${request.volume[0].toUpperCase()}:`
+    const media = volumes.find((entry) => `${entry.letter}:` === volume)?.mediaType
+    if (requiresHdd(request.action) && media !== 'HDD') throw new Error('This operation requires a detected HDD.')
+    const action = media === 'SSD' && (request.action === 'optimize' || request.action === 'quick') ? 'retrim' : request.action
+    const flags = {
+      analyze: ['/A', '/V'], optimize: ['/O', '/U', '/V'], traditional: ['/D', '/U', '/V'],
+      quick: ['/O', '/U'], freeSpace: ['/X', '/U', '/V'], retrim: ['/L', '/U'],
+      slab: ['/K', '/U'], bootOptimize: ['/B'], files: ['/D', '/U', '/File', ...(request.files ?? [])]
+    }
+    const args = [volume, ...flags[action]]
+    return { executable: 'defrag.exe', args, display: `defrag.exe ${args.map((arg) => /\s/.test(arg) ? `"${arg}"` : arg).join(' ')}` }
+  }
+
   const runJob = async (request: DefragRequest): Promise<DefragJob> => {
     const base: DefragJob = {
       id: `job_${Date.now()}`,
       action: request.action,
       volume: request.volume,
       state: 'running',
-      command: `defrag.exe ${request.volume} ${request.action === 'analyze' ? '/A /V' : '/O /U /V'}`,
+      command: previewCommand(request).display,
       percent: 0,
       phase: request.action === 'analyze' ? 'Analyzing' : 'Optimizing',
       startedAt: nowIso(),
@@ -245,7 +261,7 @@ function buildMock(): UltraApi {
     }
 
     if (request.dryRun) {
-      job = { ...base, state: 'completed', percent: 100, phase: 'dry run — command not executed', finishedAt: nowIso(), lines: [`dry run: ${base.command}`] }
+      job = { ...base, dryRun: true, state: 'completed', percent: 100, phase: 'dry run — command not executed', finishedAt: nowIso(), lines: [`dry run: ${base.command}`] }
       for (const listener of jobListeners) listener(job)
       return job
     }
@@ -276,7 +292,8 @@ function buildMock(): UltraApi {
     },
     getSettings: async () => settings,
     saveSettings: async (patch) => {
-      settings = { ...settings, ...patch } as Settings
+      settings = Object.fromEntries(Object.entries(settings).map(([key, section]) =>
+        [key, { ...section, ...patch[key as keyof Settings] }])) as unknown as Settings
       emit()
       return settings
     },
@@ -287,24 +304,22 @@ function buildMock(): UltraApi {
 
     analyze: async (volume, dryRun) => runJob({ action: 'analyze', volume, dryRun }),
     startJob: async (request) => runJob(request),
+    startJobs: async (requests) => Promise.all(requests.map(runJob)),
     cancelJob: async () => {
       if (job) job = { ...job, state: 'cancelled', finishedAt: nowIso() }
     },
+    cancelPowerAction: async () => false,
     getJob: async () => job,
     getHistory: async () => history,
-    previewCommand: async (request) => ({
-      executable: 'defrag.exe',
-      args: [request.volume, '/O', '/U', '/V'],
-      display: `defrag.exe ${request.volume} /O /U /V`
-    }),
+    previewCommand: async (request) => previewCommand(request),
 
     getHealth: async () => mockHealth,
     getLibraries: async () => mockLibraries,
     addLibrary: async () => mockLibraries.map((l) => l.path),
     removeLibrary: async () => [],
-    scanLargeFiles: async () => {
+    scanLargeFiles: async ({ volume, minSizeMb, limit }) => {
       await delay(400)
-      return mockLargeFiles.filter((f) => !settings.defrag.skipFilesOver1Gb || f.sizeBytes > 1024 ** 3)
+      return mockLargeFiles.filter((file) => (!volume || file.volumeLetter === volume[0].toUpperCase()) && file.sizeBytes >= minSizeMb * 1024 ** 2).slice(0, limit)
     },
     defragFiles: async (volume, files, dryRun) => runJob({ action: 'files', volume, files, dryRun }),
 
